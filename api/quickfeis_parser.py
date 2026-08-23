@@ -182,7 +182,7 @@ def parse_quickfeis_pdf(pdf_path):
                         warnings.append(f"Competitor {cid}, round {round_idx+1}: only {n_present} of 5 judges' "
                                         "marks were readable (expected 0 or 5). Check this competitor's row manually.")
                     if n_present == 5:
-                        row = {"competitor_id": cid, "team": meta["team"]}
+                        row = {"competitor_id": cid, "name": meta["name"], "team": meta["team"]}
                         row.update(marks)
                         round_rows[round_idx].append(row)
 
@@ -192,7 +192,7 @@ def parse_quickfeis_pdf(pdf_path):
         if not rows:
             continue
         df = pd.DataFrame(rows)
-        judge_cols = [c for c in df.columns if c not in ("competitor_id", "team")]
+        judge_cols = [c for c in df.columns if c not in ("competitor_id", "name", "team")]
         rounds.append((f"Round {round_idx + 1}", df, judge_cols))
 
     if not rounds:

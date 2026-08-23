@@ -235,7 +235,7 @@ def parse_feisresults_pdf(pdf_path):
             for metric in ("col0", "col1"):  # col0 = R1, col1 = R2 -- both are fresh, independent marks
                 label = "Recall R1" if metric == "col0" else "Recall R2"
                 cols = [c for c in judge_cols if c.endswith(f" {metric}")]
-                round_df = df[["competitor_id", "team"] + cols].dropna()
+                round_df = df[["competitor_id", "name", "team"] + cols].dropna()
                 rename = {c: c.replace(f" {metric}", "") for c in cols}
                 round_df = round_df.rename(columns=rename)
                 clean_cols = list(rename.values())
@@ -254,7 +254,7 @@ def parse_feisresults_pdf(pdf_path):
             # judgment, so we deliberately skip it). col1 = Set Dance -- the new, independent mark.
             cols = [c for c in judge_cols if c.endswith(" col1")]
             if cols:
-                round_df = df[["competitor_id", "team"] + cols].dropna()
+                round_df = df[["competitor_id", "name", "team"] + cols].dropna()
                 rename = {c: c.replace(" col1", "") for c in cols}
                 round_df = round_df.rename(columns=rename)
                 clean_cols = list(rename.values())

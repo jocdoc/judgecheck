@@ -34,7 +34,7 @@ MAX_JUDGES = 15
 MIN_JUDGES = 3
 MIN_COMPETITORS = 8
 N_PERMUTATIONS = 1000
-RESERVED_COLUMNS = {"competitor_id", "team"}
+RESERVED_COLUMNS = {"competitor_id", "team", "name"}
 
 
 class UserError(Exception):
@@ -110,6 +110,20 @@ def benjamini_hochberg(p_values):
     return q
 
 
+def _competitor_identity(df, i):
+    """Returns (key, display_label, method) for one row. Prefers matching by
+    name across events (since competition numbers are assigned fresh per
+    event and are NOT a reliable way to track the same person over time);
+    falls back to competitor_id only when no usable name is present, and
+    says so, since that fallback is a real reliability downgrade worth
+    surfacing rather than hiding."""
+    name = str(df["name"].iloc[i]).strip() if "name" in df.columns and pd.notna(df["name"].iloc[i]) else ""
+    if name:
+        return (("name", name), name, "name")
+    cid = df["competitor_id"].iloc[i]
+    return (("id", cid), f"Competitor #{cid}", "competitor_id")
+
+
 def competitor_watch(events, min_shared_events=3, q_threshold=0.10):
     rows = []
     for label, df, judge_cols in events:
@@ -117,28 +131,35 @@ def competitor_watch(events, min_shared_events=3, q_threshold=0.10):
         for judge in judge_cols:
             other = [j for j in judge_cols if j != judge]
             gap = normalized[judge] - normalized[other].mean(axis=1)
-            for i, cid in enumerate(df["competitor_id"]):
-                rows.append({"competitor_id": cid,
+            for i in range(len(df)):
+                key, display, method = _competitor_identity(df, i)
+                rows.append({"key": key, "display": display, "method": method,
                             "team": str(df["team"].iloc[i]) if "team" in df.columns else "",
                             "judge": judge, "gap": float(gap.iloc[i])})
     history = pd.DataFrame(rows)
+    if history.empty:
+        return [], 0, {"name": 0, "competitor_id": 0}
+    match_method_counts = history.drop_duplicates(subset=["key"])["method"].value_counts().to_dict()
+
     results = []
-    for (cid, judge), grp in history.groupby(["competitor_id", "judge"]):
+    for (key, judge), grp in history.groupby(["key", "judge"]):
         if len(grp) < min_shared_events:
             continue
         gaps = grp["gap"].values
         _, p = sstats.ttest_1samp(gaps, popmean=0.0)
-        results.append({"competitor_id": cid, "team": grp["team"].iloc[0], "judge": judge,
+        results.append({"display": grp["display"].iloc[0], "team": grp["team"].iloc[0], "judge": judge,
+                        "match_method": grp["method"].iloc[0],
                         "events": len(grp), "avg_gap": float(gaps.mean()),
                         "direction": "favored" if gaps.mean() > 0 else "punished", "p": float(p)})
     if not results:
-        return [], 0
+        return [], 0, {"name": match_method_counts.get("name", 0), "competitor_id": match_method_counts.get("competitor_id", 0)}
     q = benjamini_hochberg([r["p"] for r in results])
     for r, qv in zip(results, q):
         r["q"] = float(qv)
         r["flagged"] = bool(qv < q_threshold)
     results.sort(key=lambda r: r["q"])
-    return results, len(results)
+    return results, len(results), {"name": match_method_counts.get("name", 0),
+                                    "competitor_id": match_method_counts.get("competitor_id", 0)}
 
 
 # ===========================================================================
@@ -362,30 +383,43 @@ def render_single_event_report(rounds, event_name, extra_warnings=None):
 
 
 def render_watch_report(events, title):
-    results, n_tested = competitor_watch(events)
+    results, n_tested, match_counts = competitor_watch(events)
     n_events = len(events)
     flagged = [r for r in results if r.get("flagged")]
     mode_note = f"Checked all {n_tested} competitor/judge pairs with at least 3 shared events"
 
+    id_note = ""
+    n_id_fallback = match_counts.get("competitor_id", 0)
+    if n_id_fallback > 0:
+        id_note = (f'<p class="team-note" style="margin-top:4px;">{n_id_fallback} competitor(s) had no name '
+                   'in the data and were matched across events by competitor number instead, which is less '
+                   'reliable -- competition numbers are usually reassigned at each event, so this can '
+                   'occasionally merge two different people or miss a real match. Any flag built on that '
+                   'fallback is marked below.</p>')
+
     if not flagged:
         body = (f'<div class="clear-banner">No consistent pattern found.'
                 f'<span>{mode_note}, across {n_events} events. A single unusual event for one '
-                'competitor isn\'t enough to flag on its own.</span></div>')
+                'competitor isn\'t enough to flag on its own.</span></div>' + id_note)
     else:
         cards = []
         for r in flagged:
             word = "Favored" if r["direction"] == "favored" else "Punished"
             verb = ("scored this competitor higher" if r["direction"] == "favored"
                     else "scored this competitor lower")
+            method_note = ("" if r["match_method"] == "name" else
+                           ' <span style="color:var(--caution);">(matched by competition number only -- '
+                           'no name on file, confirm this is really one person)</span>')
             cards.append(
                 f'<div class="watch-card {r["direction"]}"><div class="watch-card-top"><div>'
-                f'<div class="watch-who">Competitor {r["competitor_id"]} &middot; {r["judge"]}</div>'
+                f'<div class="watch-who">{r["display"]} &middot; {r["judge"]}</div>'
                 f'<div class="watch-meta">{("Team " + r["team"] + " &middot; ") if r["team"] else ""}{r["events"]} shared events</div></div>'
                 f'<div class="pill {"favored-flag" if r["direction"]=="favored" else "punished-flag"}">{word}</div></div>'
                 f'<p class="watch-detail">Across their shared events, <b>{r["judge"]}</b> consistently {verb} '
-                f'than the rest of the panel did. Estimated chance this is a false alarm: <b>{r["q"]*100:.1f}%</b>.</p></div>')
+                f'than the rest of the panel did. Estimated chance this is a false alarm: <b>{r["q"]*100:.1f}%</b>.'
+                f'{method_note}</p></div>')
         body = (f'<p class="subtitle" style="border-bottom:none;padding-bottom:0;">{mode_note}, '
-                f'across {n_events} events.</p>{"".join(cards)}')
+                f'across {n_events} events.</p>{id_note}{"".join(cards)}')
 
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -393,8 +427,9 @@ def render_watch_report(events, title):
 <body><div class="sheet">
 <p class="eyebrow">Multi-Event Pattern Check</p><h1>{title}</h1>
 {body}
-<footer>{DISCLAIMER} Results are corrected for the number of pairs checked, so a flag here is
-meaningfully rarer than a single-event flag.</footer>
+<footer>{DISCLAIMER} This tracks the same person across separate competitions by name where possible
+(competition numbers are reassigned each event, so they aren't used as the primary match). Results are
+corrected for the number of pairs checked, so a flag here is meaningfully rarer than a single-event flag.</footer>
 </div></body></html>"""
 
 
@@ -410,6 +445,7 @@ def _rounds_to_preview_json(rounds):
         for _, row in df.iterrows():
             marks = {j: (None if pd.isna(row[j]) else float(row[j])) for j in judge_cols}
             rows.append({"competitor_id": int(row["competitor_id"]),
+                        "name": str(row["name"]) if "name" in df.columns and pd.notna(row["name"]) else "",
                         "team": str(row["team"]) if "team" in df.columns else "",
                         "marks": marks})
         out.append({"label": label, "judges": judge_cols, "rows": rows})
@@ -427,7 +463,8 @@ def _preview_json_to_rounds(confirmed_rounds):
             raise UserError(f'"{label}" has fewer than {MIN_JUDGES} judges after editing; cannot analyze.')
         records = []
         for row in r.get("rows", []):
-            rec = {"competitor_id": row.get("competitor_id"), "team": row.get("team", "")}
+            rec = {"competitor_id": row.get("competitor_id"), "name": row.get("name", ""),
+                  "team": row.get("team", "")}
             marks = row.get("marks", {})
             ok = True
             for j in judges:
@@ -461,15 +498,17 @@ def analyze_payload(payload):
     if "confirmed_rounds" in payload:
         rounds = _preview_json_to_rounds(payload["confirmed_rounds"])
         title = payload.get("title") or "Judge Panel Review"
-        if len(rounds) == 1 and payload.get("mode") != "watch_list":
-            html = render_single_event_report(rounds, title)
+        if payload.get("mode") == "watch_list":
+            # Rounds may come from many different PDFs (many competitions) --
+            # pool everything and look for judges who consistently favor or
+            # punish the same person across separate events.
+            html = render_watch_report(rounds, title)
+            return {"html": html, "mode": "watch_list"}
         else:
-            # multiple rounds from one PDF: default view is a stacked single-event
-            # report per round (they're the same competition, not separate historical
-            # events) -- the multi-event watch tool remains available for uploads of
-            # genuinely separate competitions via the CSV/XLSX path.
+            # One PDF's rounds (same competition, different panels per round) --
+            # stack as sections in one page, no cross-round person-tracking.
             html = render_single_event_report(rounds, title)
-        return {"html": html, "mode": "single_event"}
+            return {"html": html, "mode": "single_event"}
 
     files = payload.get("files", [])
     if not files:
@@ -481,27 +520,41 @@ def analyze_payload(payload):
     other_files = [f for f in files if not str(f.get("name", "")).lower().endswith(".pdf")]
 
     if pdf_files:
-        if len(pdf_files) > 1 or other_files:
-            raise UserError("Please upload one PDF at a time (not mixed with other files).")
-        f = pdf_files[0]
-        raw = base64.b64decode(f["content"])
-        tmp_path = "/tmp/upload.pdf"
-        with open(tmp_path, "wb") as out:
-            out.write(raw)
-        try:
-            rounds, fmt, warnings = parse_results_pdf(tmp_path)
-        except UnrecognizedFormatError as e:
-            raise UserError(str(e))
-        if not rounds:
-            raise UserError("Couldn't extract any usable judge panels from this PDF. " +
-                            (" ".join(warnings) if warnings else ""))
-        # --- Path 2: return a preview, don't analyze yet ---
+        if other_files:
+            raise UserError("Please upload PDFs separately from CSV/Excel files.")
+
+        all_rounds = []       # [(label, df, judge_cols), ...] across every PDF
+        all_warnings = []
+        formats_seen = set()
+        for f in pdf_files:
+            raw = base64.b64decode(f["content"])
+            tmp_path = f"/tmp/upload_{len(all_rounds)}.pdf"
+            with open(tmp_path, "wb") as out:
+                out.write(raw)
+            source_name = f["name"].rsplit(".", 1)[0]
+            try:
+                rounds, fmt, warnings = parse_results_pdf(tmp_path)
+            except UnrecognizedFormatError as e:
+                raise UserError(f'"{f["name"]}": {e}')
+            if not rounds:
+                raise UserError(f'"{f["name"]}": couldn\'t extract any usable judge panels. ' +
+                                (" ".join(warnings) if warnings else ""))
+            formats_seen.add(fmt)
+            for label, df, judge_cols in rounds:
+                # tag each round with its source file so the preview can group
+                # them and the report can still say which competition is which
+                all_rounds.append((f"{source_name} \u2014 {label}", df, judge_cols))
+            all_warnings.extend(f'"{f["name"]}": {w}' for w in warnings)
+
+        is_batch = len(pdf_files) > 1
         return {
             "preview": True,
-            "format": fmt,
-            "title": f["name"].rsplit(".", 1)[0],
-            "rounds": _rounds_to_preview_json(rounds),
-            "warnings": warnings,
+            "format": " + ".join(sorted(formats_seen)),
+            "title": (f"Competitor Watch List \u2014 {len(pdf_files)} competitions" if is_batch
+                     else pdf_files[0]["name"].rsplit(".", 1)[0]),
+            "mode": "watch_list" if is_batch else "single_event",
+            "rounds": _rounds_to_preview_json(all_rounds),
+            "warnings": all_warnings,
         }
 
     # --- Path 1: CSV/XLSX, unchanged from v1 ---
