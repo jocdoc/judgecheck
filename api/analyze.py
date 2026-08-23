@@ -972,18 +972,36 @@ def analyze_payload(payload):
 
         # query_judge / query_team / query_competitor
         kind_map = {
-            "query_judge": ("judge", db.fetch_rounds_for_judge),
-            "query_team": ("team", db.fetch_rounds_for_team),
-            "query_competitor": ("competitor", db.fetch_rounds_for_competitor),
+            "query_judge": ("judge", "judge_name", db.fetch_rounds_for_judge),
+            "query_team": ("team", "team", db.fetch_rounds_for_team),
+            "query_competitor": ("competitor", "competitor_name", db.fetch_rounds_for_competitor),
         }
-        subject_kind, fetch_fn = kind_map[action]
+        subject_kind, column_kind, fetch_fn = kind_map[action]
         subject_name = payload.get("name", "").strip()
         if not subject_name:
             raise UserError("Please provide a name to search for.")
-        rounds = fetch_fn(subject_name)
+        try:
+            rounds = fetch_fn(subject_name)
+        except Exception as e:
+            # Deliberately surfaced as a UserError (shown to the person) rather than
+            # left to fall through to the generic catch-all in do_POST, which hides
+            # the actual cause -- a real gap found live: a database-layer failure here
+            # was previously indistinguishable from a PDF-parsing failure, both showing
+            # the same unhelpful "check it against the template" message.
+            raise UserError(f"The archive lookup failed ({type(e).__name__}: {e}). "
+                            "This is likely a database issue, not a search problem -- "
+                            "please share this exact message so it can be diagnosed.")
         if not rounds:
-            raise UserError(f'No history found for "{subject_name}". Check the spelling, or it may not be in the archive yet.')
-        html = render_history_report(rounds, subject_kind, subject_name)
+            try:
+                suggestions = db.fuzzy_match_names(subject_name, kind=column_kind)
+            except Exception:
+                suggestions = []
+            return {"no_results": True, "subject_name": subject_name, "action": action, "suggestions": suggestions}
+        try:
+            html = render_history_report(rounds, subject_kind, subject_name)
+        except Exception as e:
+            raise UserError(f"Found archive data but couldn't build the report ({type(e).__name__}: {e}). "
+                            "Please share this exact message so it can be diagnosed.")
         return {"html": html, "mode": "history_query"}
 
     # --- Path 3: confirmed data from the PDF preview step ---
@@ -1094,6 +1112,12 @@ class handler(BaseHTTPRequestHandler):
         except UserError as e:
             self._send(400, {"error": str(e)})
         except Exception:
+            # Found live: this was previously silent -- caught the exception but never
+            # printed it anywhere, so Vercel's Function logs showed nothing beyond the
+            # bare "500" access-log line, no matter what actually went wrong. Printing
+            # the traceback to stderr here is what makes it show up in those logs at all.
+            import traceback
+            traceback.print_exc()
             self._send(500, {"error": "Something went wrong analyzing this file. "
                                        "Please check it against the template and try again."})
 
