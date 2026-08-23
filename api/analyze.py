@@ -17,6 +17,7 @@ carries the extracted/edited table in step 2->3, not the server.
 """
 
 import base64
+import os
 import io
 import json
 from http.server import BaseHTTPRequestHandler
@@ -522,6 +523,23 @@ def analyze_payload(payload):
 
 
 class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        # This function currently receives ALL traffic to the site, not just
+        # /api/analyze -- so it needs to serve the homepage itself for GET
+        # requests, not just handle the POST analysis calls.
+        try:
+            index_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "index.html")
+            with open(index_path, "rb") as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            self.send_response(404)
+            self.end_headers()
+
     def do_POST(self):
         try:
             length = int(self.headers.get("Content-Length", 0))
