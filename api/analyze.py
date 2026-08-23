@@ -301,6 +301,8 @@ section.block{margin-bottom:24px}
 h2{font-family:'IBM Plex Mono',monospace;font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft);border-bottom:1px solid var(--line);padding-bottom:8px;margin:0 0 14px}
 .judge-row{display:grid;grid-template-columns:140px 1fr 46px;align-items:center;gap:10px;margin-bottom:10px;font-size:13.5px}
 .judge-name{font-weight:500}.judge-name.flagged{color:var(--flag);font-weight:600}
+.archive-note{font-size:10.5px;font-weight:400;color:var(--ink-soft);margin-top:1px}
+.archive-note.flagged{color:var(--flag);font-weight:600}
 .bar-track{background:var(--line);border-radius:5px;height:10px;overflow:hidden}
 .bar-fill{height:100%;border-radius:5px;background:var(--ink-soft)}.bar-fill.flagged{background:var(--flag)}
 .judge-pct{text-align:right;color:var(--ink-soft);font-size:12.5px;font-family:'IBM Plex Mono',monospace}
@@ -342,6 +344,12 @@ def _analyze_one_round(df, judge_cols, round_label, is_multi_round):
     order = np.argsort(z_scores)
     target_judge = judge_cols[order[0]]
 
+    # Archive cross-reference: cheap "N events on record" for every judge,
+    # plus the fuller archive-pattern check ONLY for the judge already
+    # flagged as most unusual here -- see judge_archive_badge()'s docstring
+    # for why this is deliberately bounded rather than run for every judge.
+    archive_info = {j: judge_archive_badge(j, deep_check=(j == target_judge)) for j in judge_cols}
+
     if p >= 0.10:
         status_class, status_word = "status-clear", "Clear"
         headline = (f"All {len(judge_cols)} judges' rankings line up about as well as you'd "
@@ -366,8 +374,17 @@ def _analyze_one_round(df, judge_cols, round_label, is_multi_round):
     for i in order:
         pct = max(0, min(100, (avg_agreement[i] - lo) / span * 100))
         is_flagged = (judge_cols[i] == target_judge) and (p < 0.10)
+        info = archive_info[judge_cols[i]]
+        archive_note = ""
+        if info["available"] and info["n_events"] > 0:
+            note_text = f'{info["n_events"]} prior event(s) on record'
+            note_cls = "archive-note"
+            if info.get("deep_checked") and (info["comp_flagged"] or info["team_flagged"]):
+                note_text += " &middot; archive pattern flagged"
+                note_cls += " flagged"
+            archive_note = f'<div class="{note_cls}">{note_text}</div>'
         judge_rows.append(
-            f'<div class="judge-row"><div class="judge-name{" flagged" if is_flagged else ""}">{judge_cols[i]}</div>'
+            f'<div class="judge-row"><div class="judge-name{" flagged" if is_flagged else ""}">{judge_cols[i]}{archive_note}</div>'
             f'<div class="bar-track"><div class="bar-fill{" flagged" if is_flagged else ""}" style="width:{pct:.0f}%"></div></div>'
             f'<div class="judge-pct">{avg_agreement[i]:.2f}</div></div>')
 
@@ -398,6 +415,38 @@ def _analyze_one_round(df, judge_cols, round_label, is_multi_round):
         f'<tr><td>{judge_cols[i]}</td><td>agreement {avg_agreement[i]:.3f} &middot; z = {z_scores[i]:.2f}</td></tr>'
         for i in order)
 
+    # Archive History section: only for the deep-checked (target) judge, and
+    # only if they actually have archive events on record -- a brand-new
+    # judge with zero history gets no section at all, not an empty one.
+    archive_html = ""
+    target_info = archive_info[target_judge]
+    if target_info["available"] and target_info["n_events"] > 0 and target_info.get("deep_checked"):
+        comp_flagged = target_info["comp_flagged"]
+        team_flagged = target_info["team_flagged"]
+        cards = []
+        for r in comp_flagged:
+            word = "Favored" if r["direction"] == "favored" else "Punished"
+            cards.append(
+                f'<div class="watch-card {r["direction"]}"><div class="watch-card-top"><div>'
+                f'<div class="watch-who">{r["display"]}</div>'
+                f'<div class="watch-meta">{r["events"]} shared rounds in the archive</div></div>'
+                f'<div class="pill {"favored-flag" if r["direction"]=="favored" else "punished-flag"}">{word}</div></div>'
+                f'<p class="watch-detail">Chance this is a false alarm: <b>{r["q"]*100:.1f}%</b>.</p></div>')
+        for r in team_flagged:
+            word = "Favored" if r["direction"] == "favored" else "Punished"
+            cards.append(
+                f'<div class="watch-card {r["direction"]}"><div class="watch-card-top"><div>'
+                f'<div class="watch-who">{r["team"]}</div>'
+                f'<div class="watch-meta">{r["n_competitors"]} competitors across {r["n_rounds"]} rounds in the archive</div></div>'
+                f'<div class="pill {"favored-flag" if r["direction"]=="favored" else "punished-flag"}">{word}</div></div>'
+                f'<p class="watch-detail">Chance this is a false alarm: <b>{r["q"]*100:.1f}%</b>.</p></div>')
+        if cards:
+            body = f'<p class="team-note" style="margin-bottom:10px;">Checked against {target_info["n_events"]} prior event(s) in the archive.</p>{"".join(cards)}'
+        else:
+            body = (f'<div class="clear-banner">No consistent pattern found in this judge\'s archive history.'
+                    f'<span>Checked against {target_info["n_events"]} prior event(s) on record.</span></div>')
+        archive_html = f'<section class="block"><h2>Archive History &mdash; {target_judge}</h2>{body}</section>'
+
     heading = f'<div class="round-divider"><h1>{round_label}</h1><p class="subtitle" style="border:none;padding:0;margin:0;">{len(judge_cols)} judges &middot; {len(df)} competitors</p></div>' if is_multi_round else ""
 
     return f"""{heading}
@@ -409,6 +458,7 @@ def _analyze_one_round(df, judge_cols, round_label, is_multi_round):
 odds of seeing this by pure chance.</p></div></div>
 <section class="block"><h2>How Closely Each Judge Matched the Panel</h2>{"".join(judge_rows)}</section>
 {team_html}
+{archive_html}
 <details><summary>For the statistically curious &mdash; {round_label}</summary><table class="tech-table">
 <tr><td colspan="2" style="padding-top:0;">Permutation-calibrated significance ({N_PERMUTATIONS} shuffles)</td></tr>
 <tr><td>most unusual judge</td><td>{target_judge}</td></tr>
@@ -701,15 +751,12 @@ def bulk_sanity_checks(rounds, stated_count, parse_warnings):
     return issues
 
 
-def render_history_report(rounds, subject_kind, subject_name):
-    """Renders a profile-style report for 'everything the archive knows
-    about this judge/team/competitor' -- runs the same competitor_watch and
-    team_watch used for session-based multi-event uploads, on whatever
-    history the database query returned, then filters the results down to
-    the one subject that was actually searched for (a judge query still
-    pulls in the other judges who share those rounds, since that's needed
-    to compute the panel comparison -- but only the target judge's own
-    results are shown)."""
+def _compute_subject_flags(rounds, subject_kind, subject_name):
+    """Shared computation behind both the 'Search the archive' page and the
+    new archive cross-reference in single-event reports: runs the same
+    competitor_watch/team_watch used everywhere else on whatever rounds were
+    passed in, then filters down to one subject. Returns
+    (n_events, n_rounds, comp_flagged, team_flagged)."""
     n_events = _count_distinct_events(rounds)
     n_rounds = len(rounds)
 
@@ -719,7 +766,7 @@ def render_history_report(rounds, subject_kind, subject_name):
     elif subject_kind == "judge":
         team_results = [r for r in team_results if r["judge"] == subject_name]
     else:
-        team_results = []  # a single competitor's own team pattern isn't the question being asked here
+        team_results = []
     team_flagged = [r for r in team_results if r.get("flagged")]
 
     comp_results, n_comp_tested, match_counts = competitor_watch(rounds)
@@ -730,6 +777,58 @@ def render_history_report(rounds, subject_kind, subject_name):
     else:
         comp_results = []
     comp_flagged = [r for r in comp_results if r.get("flagged")]
+
+    return n_events, n_rounds, comp_flagged, team_flagged
+
+
+def judge_archive_badge(judge_name, deep_check=False):
+    """
+    Looks up a judge's archive history for display alongside a fresh
+    single-event report. Deliberately two-tier for performance: a report
+    can involve up to 15 distinct judges (QuickFeis's 3-round rotating
+    panel format), and running the full history fetch-and-analyze for
+    every one of them on every routine upload risks real time -- this
+    project already found two genuine timeout bugs this way. So by
+    default this only runs the cheap COUNT query; pass deep_check=True
+    (the caller does this only for the judge already flagged as most
+    unusual in the fresh single-event stats) to also fetch full history
+    and check for archived patterns.
+
+    Returns a dict that's always safe to render, even if the database
+    isn't configured yet or a query fails -- {"available": False} in that
+    case, never an exception that would take down the whole report.
+    """
+    try:
+        from . import db
+        n_events = db.count_events_for_judge(judge_name)
+    except Exception:
+        return {"available": False}
+
+    result = {"available": True, "n_events": n_events, "deep_checked": False}
+    if not deep_check or n_events == 0:
+        return result
+
+    try:
+        rounds = db.fetch_rounds_for_judge(judge_name)
+        _, _, comp_flagged, team_flagged = _compute_subject_flags(rounds, "judge", judge_name)
+        result["deep_checked"] = True
+        result["comp_flagged"] = comp_flagged
+        result["team_flagged"] = team_flagged
+    except Exception:
+        pass  # fall back to the count-only result rather than fail the whole report
+    return result
+
+
+def render_history_report(rounds, subject_kind, subject_name):
+    """Renders a profile-style report for 'everything the archive knows
+    about this judge/team/competitor' -- runs the same competitor_watch and
+    team_watch used for session-based multi-event uploads, on whatever
+    history the database query returned, then filters the results down to
+    the one subject that was actually searched for (a judge query still
+    pulls in the other judges who share those rounds, since that's needed
+    to compute the panel comparison -- but only the target judge's own
+    results are shown)."""
+    n_events, n_rounds, comp_flagged, team_flagged = _compute_subject_flags(rounds, subject_kind, subject_name)
 
     subject_label = {"judge": "Judge", "team": "School", "competitor": "Competitor"}[subject_kind]
     cards = []

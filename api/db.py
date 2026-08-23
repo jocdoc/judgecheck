@@ -183,6 +183,21 @@ def _rounds_where(cur, where_clause, params):
     return rounds
 
 
+def count_events_for_judge(judge_name):
+    """Fast COUNT query -- deliberately cheap, unlike fetch_rounds_for_judge
+    which reconstructs full panel data for every round the judge appears in.
+    Used to show a lightweight 'N events on record' figure for every judge
+    in a single-event report without paying the cost of a full history
+    fetch-and-analyze for judges nobody's asking about."""
+    conn = _connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(DISTINCT event_id) FROM marks WHERE judge_name = %s", (judge_name,))
+            return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
 def fetch_rounds_for_judge(judge_name):
     conn = _connection()
     try:

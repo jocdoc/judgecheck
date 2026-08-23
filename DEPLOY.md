@@ -250,3 +250,54 @@ batch-upload limit (`MAX_FILES`, used by the interactive review flow) was
 set to 12, but a real timing test showed 12 real PDFs take ~67 seconds to
 parse — over the 60-second function limit. It's been lowered to 6, based on
 measured timing with real files, not a guess.
+
+## Single-event reviews now cross-reference the archive (new)
+
+Uploading and reviewing one competition used to be completely blind to the
+archive — a judge flagged across ten prior saved competitions would show as
+"Clear" on an eleventh, with no indication the archive holds contrary
+evidence. Every single-event report now cross-references each judge against
+their archive history, if the database is configured.
+
+**Deliberately two-tier for performance**, since a QuickFeis PDF can involve
+up to 15 distinct judges across its 3 rotating panels, and this project has
+already found two real timeout bugs from naive per-item processing:
+- Every judge gets a cheap "N prior events on record" count (one fast query
+  each).
+- Only the judge already flagged as most unusual in the fresh single-event
+  statistics gets the full archive-pattern check (fetching their complete
+  history and re-running the same competitor/school pattern detection used
+  by "Search the archive"). This bounds the expensive computation to at
+  most one judge per round, regardless of how many total judges are in the
+  file.
+
+If a judge's archive history shows a real pattern, it appears both as a
+small badge next to their name in the judge-agreement bars, and as a
+dedicated "Archive History" section with the same level of detail as a
+direct archive search. If the database isn't configured, or a query fails
+for any reason, the report renders exactly as before with no archive
+section — this was tested directly (no `DATABASE_URL` set at all) to
+confirm it never breaks the core report.
+
+**Worth knowing about the numbers that can appear here:** the archive
+cross-check uses the same FDR-corrected, multi-observation statistics as
+"Search the archive" and the multi-event watch list — which is a
+deliberately more conservative test than the single-event permutation
+check used for the fresh upload itself. A team/judge pattern that looks
+notable within one event (say, 1-2% odds by chance) can legitimately show
+as "no clear pattern" when tested against a judge's full archive, corrected
+for every school they've worked with. That's not a bug or an inconsistency
+between the two numbers — it's the same "multiple comparisons demand
+stronger evidence" principle this whole project is built on, just visible
+in one place instead of two separate reports.
+
+### Toward a judge rating/directory system
+
+This is the natural foundation for what was discussed as a longer-term
+goal: a searchable directory of every judge in the archive, sortable by
+event count and flag history, for quickly vetting judges before inviting
+them to an event. Not built yet — this session's work only wires archive
+awareness into the single-event report. The next step would be a dedicated
+page reusing `judge_archive_badge()` (or a bulk variant of it) across every
+judge in the archive at once, rather than one PDF's worth of judges at a
+time.
