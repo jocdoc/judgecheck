@@ -51,6 +51,13 @@ h1 em{font-style:italic;font-weight:500;color:var(--clear)}
 .file-list button{background:none;border:none;color:var(--flag);cursor:pointer;font-size:12px;font-family:'Instrument Sans',sans-serif}
 
 .mode-note{font-size:12.5px;color:var(--ink-soft);margin:12px 0 0;padding:10px 12px;background:var(--paper);border-radius:7px;border:1px solid var(--line)}
+.bulk-progress-bar{background:var(--line);border-radius:6px;height:8px;overflow:hidden}
+.bulk-progress-fill{height:100%;background:var(--brass);border-radius:6px;width:0%;transition:width .3s}
+.status-pill{font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:.02em;white-space:nowrap}
+.status-pill.saved{background:var(--clear-bg);color:var(--clear)}
+.status-pill.duplicate{background:var(--paper);color:var(--ink-soft);border:1px solid var(--line)}
+.status-pill.needs_review{background:var(--caution-bg);color:var(--caution)}
+.status-pill.error{background:var(--flag-bg);color:var(--flag)}
 .mode-note b{color:var(--ink)}
 
 .actions{display:flex;gap:12px;align-items:center;margin-top:18px;flex-wrap:wrap}
@@ -162,6 +169,37 @@ table.preview-table tr:nth-child(even) td{background:#FAFAF8}
       <span class="spinner" id="archiveSpinner">searching archive&hellip;</span>
     </div>
     <div class="error" id="archiveErrorBox"></div>
+  </div>
+
+  <div class="upload-card" id="bulkImportCard">
+    <h2>Bulk import to archive</h2>
+    <p class="upload-sub">Select any number of QuickFeis or feisresults.com PDFs at once. Each file is checked automatically
+      (competitor count against what the PDF itself states, no impossible marks, no judge scoring everyone identically) —
+      clean files save straight to the archive with no review needed; anything that fails a check is listed at the end
+      for you to run through the normal one-at-a-time upload instead. Files are sent to the server in small batches
+      automatically, so this is safe for a handful of files or several hundred.</p>
+    <div class="dropzone" id="bulkDropzone">
+      <p>Drag many PDFs here, or click to choose</p>
+      <p class="hint">No file-count limit on this screen — selecting 200 files is fine</p>
+    </div>
+    <input type="file" id="bulkFileInput" multiple accept=".pdf">
+    <div class="mode-note" id="bulkModeNote" style="display:none"></div>
+    <div class="actions">
+      <button class="btn btn-primary" id="bulkStartBtn" disabled>Start bulk import</button>
+      <button class="btn btn-ghost" id="bulkCancelBtn" style="display:none;">Cancel</button>
+    </div>
+    <div class="error" id="bulkErrorBox"></div>
+    <div id="bulkProgressArea" style="display:none;margin-top:16px;">
+      <div class="bulk-progress-bar"><div class="bulk-progress-fill" id="bulkProgressFill"></div></div>
+      <p class="team-note" id="bulkProgressText" style="margin-top:8px;"></p>
+      <div class="table-scroll" style="max-height:320px;margin-top:12px;">
+        <table class="preview-table" id="bulkResultsTable">
+          <thead><tr><th>File</th><th>Status</th><th>Details</th></tr></thead>
+          <tbody id="bulkResultsBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div id="bulkSummary" class="mode-note" style="display:none;margin-top:12px;"></div>
   </div>
 
   <div id="previewArea"></div>
@@ -298,6 +336,7 @@ analyzeBtn.addEventListener('click', async () => {
       renderPreview(data);
       document.getElementById('uploadCard').style.display = 'none';
       document.getElementById('archiveSearchCard').style.display = 'none';
+      document.getElementById('bulkImportCard').style.display = 'none';
       document.getElementById('previewArea').style.display = 'block';
       document.getElementById('previewArea').scrollIntoView({behavior:'smooth'});
     } else {
@@ -319,6 +358,7 @@ function showReport(data){
   document.getElementById('previewArea').style.display = 'none';
   document.getElementById('uploadCard').style.display = 'none';
   document.getElementById('archiveSearchCard').style.display = 'none';
+      document.getElementById('bulkImportCard').style.display = 'none';
   frame.onload = () => { try { frame.style.height = (frame.contentDocument.body.scrollHeight + 40) + 'px'; } catch(e){} };
   document.getElementById('reportArea').scrollIntoView({behavior:'smooth'});
 }
@@ -496,6 +536,7 @@ function resetAll(){
   document.getElementById('previewArea').innerHTML = '';
   document.getElementById('uploadCard').style.display = 'block';
   document.getElementById('archiveSearchCard').style.display = 'block';
+  document.getElementById('bulkImportCard').style.display = 'block';
   window.scrollTo({top:0, behavior:'smooth'});
 }
 document.getElementById('resetBtn').addEventListener('click', resetAll);
@@ -533,6 +574,132 @@ document.getElementById('archiveSearchBtn').addEventListener('click', runArchive
 document.getElementById('archiveSearchName').addEventListener('keydown', e => {
   if (e.key === 'Enter') runArchiveSearch();
 });
+
+// ---------- Bulk import ----------
+const BULK_CHUNK_SIZE = 6; // must match MAX_FILES in api/analyze.py -- this is what keeps
+                           // each server request safely under the 60s function timeout
+let bulkFiles = [];
+let bulkCancelled = false;
+
+const bulkDropzone = document.getElementById('bulkDropzone');
+const bulkFileInput = document.getElementById('bulkFileInput');
+bulkDropzone.addEventListener('click', () => bulkFileInput.click());
+bulkDropzone.addEventListener('dragover', e => { e.preventDefault(); bulkDropzone.classList.add('dragover'); });
+bulkDropzone.addEventListener('dragleave', () => bulkDropzone.classList.remove('dragover'));
+bulkDropzone.addEventListener('drop', e => {
+  e.preventDefault(); bulkDropzone.classList.remove('dragover');
+  addBulkFiles(e.dataTransfer.files);
+});
+bulkFileInput.addEventListener('change', () => { addBulkFiles(bulkFileInput.files); bulkFileInput.value=''; });
+
+function addBulkFiles(selected){
+  const errBox = document.getElementById('bulkErrorBox');
+  errBox.style.display = 'none';
+  for (const f of selected){
+    if (!/\.pdf$/i.test(f.name)) { continue; } // bulk import is PDF-only; silently skip non-PDFs rather than block the whole selection
+    bulkFiles.push(f);
+  }
+  const note = document.getElementById('bulkModeNote');
+  const startBtn = document.getElementById('bulkStartBtn');
+  if (bulkFiles.length === 0) {
+    note.style.display = 'none';
+    startBtn.disabled = true;
+  } else {
+    note.style.display = 'block';
+    const nBatches = Math.ceil(bulkFiles.length / BULK_CHUNK_SIZE);
+    note.innerHTML = bulkFiles.length + ' PDF(s) selected &rarr; will be sent to the server in '
+      + nBatches + ' automatic batch(es) of up to ' + BULK_CHUNK_SIZE + '.';
+    startBtn.disabled = false;
+  }
+}
+
+function readFileAsBase64(file){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = () => reject(new Error('Could not read "' + file.name + '".'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderBulkResultRow(r){
+  const tbody = document.getElementById('bulkResultsBody');
+  const details = (r.reasons && r.reasons.length) ? r.reasons.join('; ')
+    : (r.status === 'duplicate' ? 'Already in the archive (event #' + r.existing_event_id + ')'
+    : (r.status === 'saved' ? 'Event #' + r.event_id : ''));
+  const row = document.createElement('tr');
+  row.innerHTML = '<td class="readonly">' + escapeHtml(r.filename) + '</td>'
+    + '<td><span class="status-pill ' + r.status + '">' + r.status.replace('_',' ') + '</span></td>'
+    + '<td class="readonly">' + escapeHtml(details) + '</td>';
+  tbody.appendChild(row);
+}
+
+async function startBulkImport(){
+  const errBox = document.getElementById('bulkErrorBox');
+  errBox.style.display = 'none';
+  bulkCancelled = false;
+
+  const startBtn = document.getElementById('bulkStartBtn');
+  const cancelBtn = document.getElementById('bulkCancelBtn');
+  startBtn.disabled = true;
+  cancelBtn.style.display = 'inline-block';
+  document.getElementById('bulkProgressArea').style.display = 'block';
+  document.getElementById('bulkSummary').style.display = 'none';
+  document.getElementById('bulkResultsBody').innerHTML = '';
+
+  const total = bulkFiles.length;
+  const counts = { saved: 0, duplicate: 0, needs_review: 0, error: 0 };
+  let processed = 0;
+
+  for (let i = 0; i < total; i += BULK_CHUNK_SIZE) {
+    if (bulkCancelled) break;
+    const chunk = bulkFiles.slice(i, i + BULK_CHUNK_SIZE);
+    document.getElementById('bulkProgressText').textContent =
+      'Processing ' + (processed + 1) + '-' + Math.min(processed + chunk.length, total) + ' of ' + total + '\u2026';
+
+    try {
+      const encoded = await Promise.all(chunk.map(async f => ({
+        name: f.name, content: await readFileAsBase64(f)
+      })));
+      const res = await fetch('/api/analyze', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ action: 'bulk_ingest', files: encoded })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Batch failed.');
+      for (const r of data.results) {
+        counts[r.status] = (counts[r.status] || 0) + 1;
+        renderBulkResultRow(r);
+      }
+    } catch (err) {
+      // a whole-batch failure (e.g. a network error) shouldn't lose track of which
+      // files were in it -- mark each as an error row so nothing silently vanishes
+      for (const f of chunk) {
+        counts.error = (counts.error || 0) + 1;
+        renderBulkResultRow({ filename: f.name, status: 'error', reasons: [err.message] });
+      }
+    }
+
+    processed += chunk.length;
+    document.getElementById('bulkProgressFill').style.width = Math.round(processed / total * 100) + '%';
+  }
+
+  const summary = document.getElementById('bulkSummary');
+  summary.style.display = 'block';
+  summary.innerHTML = (bulkCancelled ? '<b>Cancelled.</b> ' : '<b>Done.</b> ')
+    + counts.saved + ' saved &middot; ' + counts.duplicate + ' already in archive &middot; '
+    + counts.needs_review + ' need manual review &middot; ' + counts.error + ' errored'
+    + (counts.needs_review > 0 ? '. Run the flagged files through the normal single-file upload above to review and save them individually.' : '.');
+  document.getElementById('bulkProgressText').textContent = 'Finished: ' + processed + ' of ' + total + ' files processed.';
+
+  startBtn.disabled = false;
+  cancelBtn.style.display = 'none';
+  bulkFiles = [];
+  document.getElementById('bulkModeNote').style.display = 'none';
+}
+
+document.getElementById('bulkStartBtn').addEventListener('click', startBulkImport);
+document.getElementById('bulkCancelBtn').addEventListener('click', () => { bulkCancelled = true; });
 </script>
 </body>
 </html>

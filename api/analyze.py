@@ -28,7 +28,10 @@ from scipy import stats as sstats
 
 from .pdf_parsers import parse_results_pdf, UnrecognizedFormatError
 
-MAX_FILES = 12
+MAX_FILES = 6  # lowered from 12 after real timing test: 12 real PDFs took 67s to parse,
+               # exceeding the 60s Vercel function limit. 6 files measured at ~30s locally,
+               # leaving real margin for live-deployment overhead (cold starts, network I/O)
+               # that this sandbox doesn't fully reproduce.
 MAX_COMPETITORS = 500
 MAX_JUDGES = 15
 MIN_JUDGES = 3
@@ -644,6 +647,60 @@ def _content_hash_for_rounds(rounds):
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
+_BENIGN_WARNING_MARKERS = (
+    # These are informational notices about known, correctly-handled format
+    # quirks (see quickfeis_parser.py / feisresults_parser.py) -- not signs
+    # of an actual extraction problem. Counting them against a file would
+    # route perfectly good data to manual review for no real reason, which
+    # defeats the point of an automated gate.
+    "excluded from the bias-detection statistics",
+    "did not dance",
+    "likely withdrew",
+)
+
+
+def bulk_sanity_checks(rounds, stated_count, parse_warnings):
+    """
+    The automated QA gate for bulk import, standing in for the human
+    preview-and-confirm step that's impractical at hundreds of files.
+    Returns a list of human-readable issue strings; an empty list means
+    the file passes every check and is safe to auto-save without a human
+    looking at it first. Any single issue routes the file to manual review
+    instead -- deliberately conservative, since a bad row silently entering
+    the permanent archive is a much worse failure than a clean file
+    waiting an extra minute for a human glance.
+    """
+    issues = []
+    real_warnings = [w for w in parse_warnings
+                     if not any(marker in w for marker in _BENIGN_WARNING_MARKERS)]
+    if real_warnings:
+        issues.append(f"{len(real_warnings)} extraction warning(s) during parsing "
+                      f"(e.g. \"{real_warnings[0]}\")")
+    if not rounds:
+        issues.append("No usable rounds were extracted from this file.")
+        return issues  # nothing else to meaningfully check
+
+    largest_label, largest_df, _ = max(rounds, key=lambda r: len(r[1]))
+    largest_count = len(largest_df)
+
+    if stated_count is not None and abs(largest_count - stated_count) > 2:
+        issues.append(f"Competitor count mismatch: the PDF states {stated_count} competed, "
+                      f"but {largest_count} were extracted (in \"{largest_label}\").")
+    if largest_count < 3:
+        issues.append(f"Only {largest_count} competitors were extracted -- too few to check reliably.")
+
+    for label, df, judge_cols in rounds:
+        for j in judge_cols:
+            vals = df[j]
+            if (vals < 0).any() or (vals > 100).any():
+                issues.append(f"\"{label}\": judge \"{j}\" has a mark outside the expected 0-100 range.")
+            if vals.std() == 0:
+                issues.append(f"\"{label}\": judge \"{j}\" gave every competitor an identical score "
+                              "(likely an extraction problem, not a real judging pattern).")
+
+    return issues
+
+
 def render_history_report(rounds, subject_kind, subject_name):
     """Renders a profile-style report for 'everything the archive knows
     about this judge/team/competitor' -- runs the same competitor_watch and
@@ -723,7 +780,7 @@ def analyze_payload(payload):
     # --- Database actions: ingesting into or querying the permanent archive.
     # Imported lazily so the existing session-based analysis (everything
     # above) keeps working even before a database is provisioned. ---
-    if action in ("ingest", "check_duplicate", "query_judge", "query_team",
+    if action in ("ingest", "bulk_ingest", "check_duplicate", "query_judge", "query_team",
                  "query_competitor", "list_events", "search_names"):
         from . import db
 
@@ -747,6 +804,66 @@ def analyze_payload(payload):
                 )
                 saved.append({"source": source_name, "status": "saved", "event_id": event_id})
             return {"saved": saved}
+
+        if action == "bulk_ingest":
+            from .pdf_parsers import detect_format, extract_stated_competitor_count
+
+            files = payload.get("files", [])
+            if not files:
+                raise UserError("No files were received.")
+            if len(files) > MAX_FILES:
+                raise UserError(f"Send at most {MAX_FILES} files per bulk-import request "
+                                "(the frontend should be chunking automatically).")
+
+            results = []
+            for idx, f in enumerate(files):
+                name = str(f.get("name", f"file_{idx}"))
+                entry = {"filename": name}
+                try:
+                    raw = base64.b64decode(f["content"])
+                    tmp_path = f"/tmp/bulk_{idx}.pdf"
+                    with open(tmp_path, "wb") as out:
+                        out.write(raw)
+
+                    fmt_key = detect_format(tmp_path)
+                    if fmt_key is None:
+                        entry["status"] = "needs_review"
+                        entry["reasons"] = ["Format not recognized (not QuickFeis or feisresults.com)."]
+                        results.append(entry)
+                        continue
+
+                    rounds, fmt_label, parse_warnings = parse_results_pdf(tmp_path)
+                    stated_count = extract_stated_competitor_count(tmp_path, fmt_key)
+                    issues = bulk_sanity_checks(rounds, stated_count, parse_warnings)
+
+                    if issues:
+                        entry["status"] = "needs_review"
+                        entry["reasons"] = issues
+                        results.append(entry)
+                        continue
+
+                    title = name.rsplit(".", 1)[0]
+                    content_hash = _content_hash_for_rounds(rounds)
+                    existing = db.already_ingested(content_hash)
+                    if existing:
+                        entry["status"] = "duplicate"
+                        entry["existing_event_id"] = existing["id"]
+                    else:
+                        event_id = db.ingest_confirmed_rounds(
+                            rounds, title, title, fmt_label, parse_warnings, content_hash)
+                        entry["status"] = "saved"
+                        entry["event_id"] = event_id
+                    results.append(entry)
+                except UnrecognizedFormatError as e:
+                    entry["status"] = "needs_review"
+                    entry["reasons"] = [str(e)]
+                    results.append(entry)
+                except Exception as e:
+                    entry["status"] = "error"
+                    entry["reasons"] = [f"Unexpected error: {e}"]
+                    results.append(entry)
+
+            return {"results": results}
 
         if action == "list_events":
             return {"events": db.list_events()}

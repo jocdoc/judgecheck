@@ -5,6 +5,8 @@ of guessing -- a wrong silent guess is worse than an honest "I don't
 recognize this."
 """
 
+import re
+
 import pdfplumber
 
 from .quickfeis_parser import parse_quickfeis_pdf
@@ -31,6 +33,33 @@ def detect_format(pdf_path):
             second_page_text = pdf.pages[1].extract_text() or ""
             if "RECALL" in second_page_text and "IP = Irish Points" in second_page_text:
                 return "feisresults"
+    return None
+
+
+def extract_stated_competitor_count(pdf_path, fmt):
+    """
+    Both known formats print their own count of how many competitors took
+    part, right on the page -- confirmed against all 4 real samples before
+    relying on this (48/108/108 for QuickFeis's two title variants,
+    108 for feisresults.com). This is the strongest automated sanity check
+    available: if what we extracted doesn't match what the PDF itself
+    claims, something went wrong in a way worth a human's attention, no
+    matter how confident the parser otherwise looked. Returns None if the
+    figure can't be found (a genuinely different layout), in which case
+    the caller should skip this specific check rather than fail on it.
+    """
+    with pdfplumber.open(pdf_path) as pdf:
+        if fmt == "quickfeis":
+            text = pdf.pages[0].extract_text() or ""
+            m = re.search(r"(\d+)\s+dancers competed", text)
+            return int(m.group(1)) if m else None
+        elif fmt == "feisresults":
+            for page in pdf.pages[:2]:
+                text = page.extract_text() or ""
+                m = re.search(r"Number danced\s*=\s*(\d+)", text)
+                if m:
+                    return int(m.group(1))
+            return None
     return None
 
 

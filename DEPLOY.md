@@ -192,14 +192,47 @@ actual error message and bring it back rather than guessing:
 - **No UI to browse "what's in the archive"** beyond searching a specific
   name — `db.list_events()` exists as a function but isn't wired to any page
   yet. Worth adding once there's enough saved data to want an overview.
-- **No bulk-ingest tool.** Saving your existing decade of PDFs means
-  uploading them through the same one-at-a-time (or small-batch) preview →
-  confirm → save flow as everything else — genuinely tedious for hundreds of
-  files. A dedicated bulk-upload path (skip the individual preview, rely on
-  automated sanity checks instead, flag only what looks wrong) is the natural
-  next step once the basic save/search flow is confirmed working live.
 - **No full-archive scan** ("which judge looks most unusual across
   everything") — only targeted lookups (a specific judge/school/competitor)
   are wired up. A full scan is a much heavier computation across hundreds of
   events and is a better fit for a scheduled background job (Vercel Cron)
   than a live request; not attempted yet.
+
+## Bulk import (new)
+
+A dedicated bulk-upload path exists now, separate from the one-file-at-a-time
+review flow: the "Bulk import to archive" card on the homepage. Select any
+number of PDFs at once (no practical limit at the file picker) and the
+browser automatically sends them to the server in small batches of 6,
+sequentially, so no single request ever risks the 60-second function
+timeout no matter how many files are selected in total.
+
+**There's no human preview step in this path** — that's impractical at
+hundreds of files. In its place, every file goes through an automated QA
+gate before being saved:
+
+- The PDF's own stated competitor count (printed on the page — confirmed
+  present on all sample files from both formats) must match what was
+  actually extracted, within a small tolerance
+- No mark outside the 0-100 range
+- No judge scoring every competitor identically (a strong signal of an
+  extraction problem, not real judging)
+- No genuine extraction warnings (informational notices about known,
+  correctly-handled format quirks — like "did not dance this round" — are
+  explicitly excluded from this check, so normal files aren't flagged for
+  no reason)
+
+A file that passes every check saves automatically. A file that fails any
+check is listed at the end with the specific reason, for you to run through
+the normal single-file upload (which still shows the full editable preview)
+instead. Duplicate detection works exactly as in the single-file flow, and
+correctly persists across separate batch requests — confirmed by testing 9
+files (forcing 2 separate server calls) where files repeating an
+already-saved competition were caught as duplicates even though they arrived
+in a different HTTP request than the original.
+
+**A real bug found and fixed while building this:** the existing multi-PDF
+batch-upload limit (`MAX_FILES`, used by the interactive review flow) was
+set to 12, but a real timing test showed 12 real PDFs take ~67 seconds to
+parse — over the 60-second function limit. It's been lowered to 6, based on
+measured timing with real files, not a guess.
