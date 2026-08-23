@@ -138,7 +138,7 @@ def competitor_watch(events, min_shared_events=3, q_threshold=0.10):
                 key, display, method = _competitor_identity(df, i)
                 rows.append({"key": key, "display": display, "method": method,
                             "team": str(df["team"].iloc[i]) if "team" in df.columns else "",
-                            "judge": judge, "gap": float(gap.iloc[i])})
+                            "judge": judge, "gap": float(gap.iloc[i]), "label": label})
     history = pd.DataFrame(rows)
     if history.empty:
         return [], 0, {"name": 0, "competitor_id": 0}
@@ -153,6 +153,7 @@ def competitor_watch(events, min_shared_events=3, q_threshold=0.10):
         results.append({"display": grp["display"].iloc[0], "team": grp["team"].iloc[0], "judge": judge,
                         "match_method": grp["method"].iloc[0],
                         "events": len(grp), "avg_gap": float(gaps.mean()),
+                        "event_labels": sorted(grp["label"].unique().tolist()),
                         "direction": "favored" if gaps.mean() > 0 else "punished", "p": float(p)})
     if not results:
         return [], 0, {"name": match_method_counts.get("name", 0), "competitor_id": match_method_counts.get("competitor_id", 0)}
@@ -209,6 +210,7 @@ def team_watch(events, min_observations=5, q_threshold=0.10):
         _, p = sstats.ttest_1samp(gaps, popmean=0.0)
         results.append({"team": team, "judge": judge, "n_competitors": len(grp),
                         "n_rounds": grp["event"].nunique(), "avg_gap": float(gaps.mean()),
+                        "event_labels": sorted(grp["event"].unique().tolist()),
                         "direction": "favored" if gaps.mean() > 0 else "punished", "p": float(p)})
     if not results:
         return [], 0
@@ -819,6 +821,46 @@ def judge_archive_badge(judge_name, deep_check=False):
     return result
 
 
+def judge_event_breakdown(rounds, judge_name, comp_flagged, team_flagged):
+    """One row per event/round this judge appeared in, cross-referenced
+    against the already-computed comp_flagged/team_flagged results (each
+    of which now carries the exact round labels it was built from, see
+    Step 1/2 above) so a specific event can be tagged with a severity
+    without running any new statistical test.
+
+    This is pure data plumbing -- attributing an already-validated result
+    back to the events that produced it, not a new inference -- so unlike
+    the calibrated_judge_test/competitor_watch/team_watch statistics
+    themselves, this doesn't need its own Monte Carlo validation. What it
+    DOES need is a correctness check that labels line up with the right
+    rows, which is a one-time sanity test, not an ongoing statistical
+    concern -- see the deploy notes.
+    """
+    flags_by_label = {}
+    for r in comp_flagged:
+        for lbl in r["event_labels"]:
+            flags_by_label.setdefault(lbl, []).append(
+                {"who": r["display"], "kind": "competitor", "q": r["q"], "direction": r["direction"]})
+    for r in team_flagged:
+        for lbl in r["event_labels"]:
+            flags_by_label.setdefault(lbl, []).append(
+                {"who": r["team"], "kind": "school", "q": r["q"], "direction": r["direction"]})
+
+    breakdown = []
+    for label, df, judge_cols in rounds:
+        if judge_name not in judge_cols:
+            continue
+        flags_here = flags_by_label.get(label, [])
+        if not flags_here:
+            severity = "clear"
+        else:
+            best_q = min(f["q"] for f in flags_here)
+            severity = "flagged" if best_q < 0.05 else "second_look"
+        breakdown.append({"label": label, "n_competitors": len(df), "n_judges": len(judge_cols),
+                          "severity": severity, "flags": flags_here})
+    return breakdown
+
+
 def render_history_report(rounds, subject_kind, subject_name):
     """Renders a profile-style report for 'everything the archive knows
     about this judge/team/competitor' -- runs the same competitor_watch and
@@ -861,6 +903,28 @@ def render_history_report(rounds, subject_kind, subject_name):
         body = (f'<p class="subtitle" style="border-bottom:none;padding-bottom:0;">Checked {n_rounds} judging '
                f'panels across {n_events} events in the archive.</p>{"".join(cards)}')
 
+    # Per-event breakdown: judge lookups only (a "school" or "competitor" lookup
+    # doesn't have a single panel-history to enumerate the same way).
+    breakdown_html = ""
+    if subject_kind == "judge":
+        breakdown = judge_event_breakdown(rounds, subject_name, comp_flagged, team_flagged)
+        breakdown.sort(key=lambda b: {"flagged": 0, "second_look": 1, "clear": 2}[b["severity"]])
+        severity_label = {"flagged": "Flagged", "second_look": "Second Look", "clear": "Clear"}
+        severity_pill_class = {"flagged": "punished-flag", "second_look": "quiet", "clear": "favored-flag"}
+        rows_html = []
+        for b in breakdown:
+            detail = ""
+            if b["flags"]:
+                who_bits = ", ".join(f'{f["who"]} ({f["kind"]})' for f in b["flags"])
+                detail = f'<div class="team-note">Involves flagged pattern with: {who_bits}</div>'
+            rows_html.append(
+                f'<div class="team-row"><div><div class="team-name">{b["label"]}</div>'
+                f'<div class="team-note">{b["n_competitors"]} competitors &middot; {b["n_judges"]} judges</div>'
+                f'{detail}</div>'
+                f'<div class="pill {severity_pill_class[b["severity"]]}">{severity_label[b["severity"]]}</div></div>')
+        breakdown_html = (f'<section class="block"><h2>Per-Event Breakdown &mdash; {subject_name}</h2>'
+                          f'{"".join(rows_html)}</section>')
+
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{subject_label}: {subject_name}</title><style>{REPORT_CSS}</style></head>
@@ -868,8 +932,11 @@ def render_history_report(rounds, subject_kind, subject_name):
 <p class="eyebrow">Archive History Lookup</p><h1>{subject_name}</h1>
 <p class="subtitle">{subject_label} &middot; {n_events} events on record</p>
 {body}
+{breakdown_html}
 <footer>{DISCLAIMER} This draws on every event in the archive involving this {subject_kind}, not just
-one session's uploads, which is why it can have more statistical power than a one-off check.</footer>
+one session's uploads, which is why it can have more statistical power than a one-off check.
+Per-event severity reflects whether that event contributed to an already-flagged competitor or school
+pattern above -- it isn't a separate statistical test.</footer>
 </div></body></html>"""
 
 
