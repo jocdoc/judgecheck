@@ -27,17 +27,31 @@ import psycopg2.extras
 
 
 def _connection():
-    """Opens a new connection using the DATABASE_URL environment variable
-    Vercel's Neon integration sets automatically. A fresh connection per
-    request (not a pool) matches how Neon expects short-lived serverless
-    functions to connect -- Neon's pooled connection string handles the
-    actual pooling on their end."""
-    url = os.environ.get("DATABASE_URL")
+    """Opens a new connection using whichever connection-string environment
+    variable is actually present. Confirmed on a real deployment that
+    Vercel's Neon Marketplace integration doesn't always name it
+    DATABASE_URL -- it created a POSTGRES_* set (POSTGRES_URL,
+    POSTGRES_HOST, etc.) instead on at least one real install. Checking
+    several known names, in the order Neon/Vercel integrations are known to
+    use them, means this doesn't silently break if the naming differs
+    between integration versions or plans. POSTGRES_URL is preferred over
+    POSTGRES_URL_NON_POOLING when both exist, since Neon's pooled connection
+    string is what's meant for short-lived serverless functions like this
+    one -- using the unpooled one instead works but defeats the point of
+    pooling under real traffic.
+
+    A fresh connection per request (not a pool on our side) matches how
+    Neon expects short-lived serverless functions to connect."""
+    url = (os.environ.get("DATABASE_URL")
+           or os.environ.get("POSTGRES_URL")
+           or os.environ.get("POSTGRES_PRISMA_URL")
+           or os.environ.get("POSTGRES_URL_NON_POOLING"))
     if not url:
         raise RuntimeError(
-            "DATABASE_URL is not set. Provision a Neon database from the Vercel "
-            "dashboard (Storage tab -> Marketplace -> Neon) and it will be set "
-            "automatically; see DEPLOY.md."
+            "No database connection string found in the environment (checked "
+            "DATABASE_URL, POSTGRES_URL, POSTGRES_PRISMA_URL, POSTGRES_URL_NON_POOLING). "
+            "Provision a Neon database from the Vercel dashboard (Storage tab -> "
+            "Marketplace -> Neon) and one of these will be set automatically; see DEPLOY.md."
         )
     return psycopg2.connect(url, sslmode="require")
 
