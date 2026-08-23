@@ -313,6 +313,22 @@ h2{font-family:'IBM Plex Mono',monospace;font-size:11.5px;letter-spacing:.1em;te
 .team-name{font-weight:500}.team-note{color:var(--ink-soft);font-size:12px}
 .pill{font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;text-transform:uppercase;letter-spacing:.03em}
 .pill.favored-flag{background:var(--clear-bg);color:var(--clear)}.pill.punished-flag{background:var(--flag-bg);color:var(--flag)}.pill.quiet{background:transparent;color:var(--ink-soft);font-weight:500}
+.pill.caution-flag{background:var(--caution-bg);color:var(--caution)}
+.stat-row{display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap}
+.stat-box{flex:1;min-width:88px;background:var(--paper-raised);border:1px solid var(--line);border-radius:8px;padding:12px 14px;text-align:center}
+.stat-box .stat-n{font-family:'Fraunces',serif;font-weight:700;font-size:22px;line-height:1}
+.stat-box .stat-label{font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-soft);margin-top:4px}
+.stat-box.clear .stat-n{color:var(--clear)}.stat-box.second_look .stat-n{color:var(--caution)}.stat-box.flagged .stat-n{color:var(--flag)}
+.experience-block{margin-bottom:20px}
+.experience-caption{font-size:12.5px;color:var(--ink-soft);margin:6px 0 0}
+.event-row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);font-size:13px}
+.event-row:last-child{border-bottom:none}
+.event-title{font-weight:500}
+.event-meta{color:var(--ink-soft);font-size:11.5px;margin-top:2px}
+.clear-list-toggle summary{font-size:12px;color:var(--ink-soft);cursor:pointer;padding:4px 0;font-family:'Instrument Sans',sans-serif}
+.clear-list-toggle{background:transparent;border:none;padding:0;margin-top:8px}
+.clear-list-row{display:flex;justify-content:space-between;color:var(--ink-soft);font-size:12px;padding:5px 0;border-bottom:1px solid var(--line)}
+.clear-list-row:last-child{border-bottom:none}
 details{background:var(--paper-raised);border:1px solid var(--line);border-radius:8px;padding:14px 16px}
 summary{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--ink-soft);cursor:pointer}
 .tech-table{margin-top:12px;font-family:'IBM Plex Mono',monospace;font-size:12px;width:100%;border-collapse:collapse}
@@ -861,7 +877,7 @@ def judge_event_breakdown(rounds, judge_name, comp_flagged, team_flagged):
     return breakdown
 
 
-def render_history_report(rounds, subject_kind, subject_name):
+def render_history_report(rounds, subject_kind, subject_name, experience=None):
     """Renders a profile-style report for 'everything the archive knows
     about this judge/team/competitor' -- runs the same competitor_watch and
     team_watch used for session-based multi-event uploads, on whatever
@@ -869,10 +885,73 @@ def render_history_report(rounds, subject_kind, subject_name):
     the one subject that was actually searched for (a judge query still
     pulls in the other judges who share those rounds, since that's needed
     to compute the panel comparison -- but only the target judge's own
-    results are shown)."""
+    results are shown).
+
+    experience: optional (n_events, percentile, n_judges_in_archive) tuple
+    from db.judge_experience_percentile, judge lookups only -- gives the
+    raw event count real context (33 events could be a lot or a little
+    depending on the pool), the same idea the single-event report already
+    applies per-panel, just extended archive-wide."""
     n_events, n_rounds, comp_flagged, team_flagged = _compute_subject_flags(rounds, subject_kind, subject_name)
 
     subject_label = {"judge": "Judge", "team": "School", "competitor": "Competitor"}[subject_kind]
+
+    # --- Experience-in-context bar (judge lookups only) ---
+    experience_html = ""
+    if subject_kind == "judge" and experience and experience[1] is not None:
+        _, percentile, n_pool = experience
+        experience_html = f"""<div class="experience-block">
+<div class="bar-track"><div class="bar-fill" style="width:{percentile}%"></div></div>
+<p class="experience-caption">More events on record than <b>{percentile}%</b> of the {n_pool} judges
+in the archive.</p></div>"""
+
+    # --- Per-event breakdown + severity summary (judge lookups only) ---
+    breakdown_html = ""
+    if subject_kind == "judge":
+        breakdown = judge_event_breakdown(rounds, subject_name, comp_flagged, team_flagged)
+        counts = {"clear": 0, "second_look": 0, "flagged": 0}
+        for b in breakdown:
+            counts[b["severity"]] += 1
+
+        stat_row = f"""<div class="stat-row">
+<div class="stat-box clear"><div class="stat-n">{counts['clear']}</div><div class="stat-label">Clear</div></div>
+<div class="stat-box second_look"><div class="stat-n">{counts['second_look']}</div><div class="stat-label">Second Look</div></div>
+<div class="stat-box flagged"><div class="stat-n">{counts['flagged']}</div><div class="stat-label">Flagged</div></div>
+</div>"""
+
+        pill_class = {"flagged": "punished-flag", "second_look": "caution-flag", "clear": "favored-flag"}
+        severity_label = {"flagged": "Flagged", "second_look": "Second Look", "clear": "Clear"}
+
+        notable = [b for b in breakdown if b["severity"] != "clear"]
+        notable.sort(key=lambda b: {"flagged": 0, "second_look": 1}[b["severity"]])
+        clear_events = [b for b in breakdown if b["severity"] == "clear"]
+
+        notable_html = ""
+        if notable:
+            rows = []
+            for b in notable:
+                who_bits = ", ".join(f'{f["who"]} ({f["kind"]})' for f in b["flags"])
+                rows.append(
+                    f'<div class="event-row"><div><div class="event-title">{b["label"]}</div>'
+                    f'<div class="event-meta">{b["n_competitors"]} competitors &middot; {b["n_judges"]} judges '
+                    f'&middot; involves: {who_bits}</div></div>'
+                    f'<div class="pill {pill_class[b["severity"]]}">{severity_label[b["severity"]]}</div></div>')
+            notable_html = f'<section class="block"><h2>Events Worth a Look</h2>{"".join(rows)}</section>'
+
+        clear_html = ""
+        if clear_events:
+            clear_rows = "".join(
+                f'<div class="clear-list-row"><span>{b["label"]}</span>'
+                f'<span>{b["n_competitors"]} competitors &middot; {b["n_judges"]} judges</span></div>'
+                for b in clear_events)
+            clear_html = f"""<details class="clear-list-toggle">
+<summary>{len(clear_events)} other event(s) checked &mdash; no pattern found, show them</summary>
+{clear_rows}</details>"""
+
+        breakdown_html = f"""<section class="block"><h2>Events On Record</h2>
+{stat_row}{notable_html}{clear_html}</section>"""
+
+    # --- Cross-event flagged patterns (unchanged logic, kept as the headline signal) ---
     cards = []
     for r in comp_flagged:
         word = "Favored" if r["direction"] == "favored" else "Punished"
@@ -895,35 +974,15 @@ def render_history_report(rounds, subject_kind, subject_name):
             f'<p class="watch-detail">Consistently {verb} than the rest of the panel for this school\'s competitors. '
             f'Estimated chance this is a false alarm: <b>{r["q"]*100:.1f}%</b>.</p></div>')
 
-    if not cards:
-        body = (f'<div class="clear-banner">No consistent pattern found.'
+    patterns_html = ""
+    if cards:
+        patterns_html = f'<section class="block"><h2>Flagged Patterns</h2>{"".join(cards)}</section>'
+    elif subject_kind != "judge":
+        # judge lookups already show the stat-row/no-pattern state above; team/competitor
+        # lookups have no per-event breakdown, so they still need their own clear-state message.
+        patterns_html = (f'<div class="clear-banner">No consistent pattern found.'
                f'<span>Checked {n_rounds} judging panels across {n_events} events in the archive '
                f'involving this {subject_kind}.</span></div>')
-    else:
-        body = (f'<p class="subtitle" style="border-bottom:none;padding-bottom:0;">Checked {n_rounds} judging '
-               f'panels across {n_events} events in the archive.</p>{"".join(cards)}')
-
-    # Per-event breakdown: judge lookups only (a "school" or "competitor" lookup
-    # doesn't have a single panel-history to enumerate the same way).
-    breakdown_html = ""
-    if subject_kind == "judge":
-        breakdown = judge_event_breakdown(rounds, subject_name, comp_flagged, team_flagged)
-        breakdown.sort(key=lambda b: {"flagged": 0, "second_look": 1, "clear": 2}[b["severity"]])
-        severity_label = {"flagged": "Flagged", "second_look": "Second Look", "clear": "Clear"}
-        severity_pill_class = {"flagged": "punished-flag", "second_look": "quiet", "clear": "favored-flag"}
-        rows_html = []
-        for b in breakdown:
-            detail = ""
-            if b["flags"]:
-                who_bits = ", ".join(f'{f["who"]} ({f["kind"]})' for f in b["flags"])
-                detail = f'<div class="team-note">Involves flagged pattern with: {who_bits}</div>'
-            rows_html.append(
-                f'<div class="team-row"><div><div class="team-name">{b["label"]}</div>'
-                f'<div class="team-note">{b["n_competitors"]} competitors &middot; {b["n_judges"]} judges</div>'
-                f'{detail}</div>'
-                f'<div class="pill {severity_pill_class[b["severity"]]}">{severity_label[b["severity"]]}</div></div>')
-        breakdown_html = (f'<section class="block"><h2>Per-Event Breakdown &mdash; {subject_name}</h2>'
-                          f'{"".join(rows_html)}</section>')
 
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -931,8 +990,9 @@ def render_history_report(rounds, subject_kind, subject_name):
 <body><div class="sheet">
 <p class="eyebrow">Archive History Lookup</p><h1>{subject_name}</h1>
 <p class="subtitle">{subject_label} &middot; {n_events} events on record</p>
-{body}
+{experience_html}
 {breakdown_html}
+{patterns_html}
 <footer>{DISCLAIMER} This draws on every event in the archive involving this {subject_kind}, not just
 one session's uploads, which is why it can have more statistical power than a one-off check.
 Per-event severity reflects whether that event contributed to an already-flagged competitor or school
@@ -1064,8 +1124,14 @@ def analyze_payload(payload):
             except Exception:
                 suggestions = []
             return {"no_results": True, "subject_name": subject_name, "action": action, "suggestions": suggestions}
+        experience = None
+        if subject_kind == "judge":
+            try:
+                experience = db.judge_experience_percentile(subject_name)
+            except Exception:
+                experience = None  # non-fatal -- report still renders without the comparison bar
         try:
-            html = render_history_report(rounds, subject_kind, subject_name)
+            html = render_history_report(rounds, subject_kind, subject_name, experience=experience)
         except Exception as e:
             raise UserError(f"Found archive data but couldn't build the report ({type(e).__name__}: {e}). "
                             "Please share this exact message so it can be diagnosed.")
