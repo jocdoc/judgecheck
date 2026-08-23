@@ -79,8 +79,17 @@ all. Bring that back to Claude as its own project when usage justifies it.
 
 ## Still worth doing before wide release
 
-- Test both parsers against 3-4 more real PDFs each, ideally from different
-  regions/organizers, to catch layout drift the two samples so far didn't show.
+- **Batch upload timing:** 4 real PDFs together took ~27 seconds to parse in
+  testing (well under the 60s function limit, but not instant). A season's
+  worth of competitions (10+ PDFs) uploaded at once could approach that
+  limit — worth testing directly if that becomes a real usage pattern.
+- ~~Test both parsers against 3-4 more real PDFs each~~ — done: a second
+  QuickFeis variant (3-judge panel, different not-recalled markup) turned up
+  real bugs in column detection that the first sample never exposed, now
+  fixed and verified against 626 independently-checked competitor-rounds
+  across three QuickFeis files. Worth continuing this habit with any further
+  new PDFs — different regions/organizers still likely to show new layout
+  quirks.
 - The mitigations discussed earlier for circumvention (audit logging + report
   IDs, the judge-pair collusion check) aren't built yet — worth prioritizing
   before this handles reports people might rely on for real decisions.

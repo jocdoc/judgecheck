@@ -87,6 +87,20 @@ def _extract_judge_columns(page, name_top_range=(85, 100)):
     return judge_columns
 
 
+def _dominant_x_cluster(candidates, tolerance=6):
+    """Returns the x0 of the LARGEST cluster of candidate words, not simply
+    the leftmost one -- robust to an outlier like a tied rank whose wider
+    text shifts its bounding box slightly, which could otherwise hijack a
+    naive minimum-x0 approach and silently misidentify a whole column."""
+    xs = sorted(w["x0"] for w in candidates)
+    best_cluster = []
+    for x in xs:
+        cluster = [y for y in xs if abs(y - x) < tolerance]
+        if len(cluster) > len(best_cluster):
+            best_cluster = cluster
+    return sum(best_cluster) / len(best_cluster)
+
+
 def _nearest(words, x_target, top_target, x_tol=20, top_tol=3):
     for w in words:
         if abs(w["x0"] - x_target) < x_tol and abs(w["top"] - top_target) < top_tol:
@@ -121,7 +135,7 @@ def _parse_panel_table(pdf_path, page_indices, table_name):
             if not candidates:
                 warnings.append(f"{table_name} page {page_idx+1}: no rank column detected; page skipped.")
                 continue
-            rank_x0 = min(w["x0"] for w in candidates)
+            rank_x0 = _dominant_x_cluster(candidates)
             rank_words = sorted([w for w in candidates if abs(w["x0"] - rank_x0) < 6], key=lambda w: w["top"])
             card_candidates = [w for w in candidates if w["x0"] > rank_x0 + 6]
             card_x0 = min((w["x0"] for w in card_candidates), default=None)

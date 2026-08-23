@@ -1,32 +1,35 @@
 """
-Parser for QuickFeis-format results PDFs (the dominant software used to
-tabulate Irish dance feis/oireachtas results). Built and tested against a
-real sample file, not a guessed format.
+Parser for QuickFeis-family results PDFs. Handles variation found across
+real files from different events/years:
+  - Panel size varies (5 judges/round in one sample, 3 judges/round in
+    another) -- detected dynamically from the header table's column count,
+    never hardcoded.
+  - "Not recalled to this round" is written two different ways across
+    samples: a blank cell (older sample) or an explicit "0.000" mark paired
+    with literal text like "NoRecall" or "No Show" in the Place column
+    (newer sample). Both are detected as "this round wasn't judged for this
+    competitor" rather than a real score, by checking whether the Place
+    cell actually contains a valid rank -- not by matching specific marker
+    text, so a third phrasing wouldn't silently slip through as a real 0.
 
-STRUCTURE OF THIS PDF FORMAT (for reference):
-- Each competition has 3 rounds, each round judged by a DIFFERENT panel of
-  5 judges (15 distinct judges total). This is a real anti-bias mechanism
-  already built into how Irish dance is judged -- panels rotate so no
-  single judge sees every dancer's every round.
-- For each dancer: 5 "position" columns (Left/Center-Left/Center/
-  Center-Right/Right) x 3 rounds x 3 numbers (Marks, Place, Indicative
-  Points). We only want "Marks" -- the judge's own raw 0-100 score --
-  since Place and I.Points are already-processed derivatives of Marks,
-  and our statistics do their own normalization from raw scores.
-- Dancer identity (number, name, school, final placement, qualifying
-  status) sits in a left-hand block, 3 short lines per dancer, that lines
-  up vertically with that dancer's 3 rounds of marks.
-- A dancer who didn't attend shows "NS" (not scored) instead of numbers.
+WHY POSITION-BASED, NOT TABLE-DETECTION-BASED: an earlier version of this
+parser used pdfplumber's automatic table detection for the per-round mark
+rows. That worked cleanly on one real sample but fragmented into dozens of
+tiny, inconsistent tables on another real sample with a different
+underlying PDF structure (same software family, different render). Word
+coordinates extract consistently across both, so this version reconstructs
+rows from coordinates throughout, the same approach already validated for
+the feisresults.com parser.
 """
 
 import re
 import pdfplumber
 import pandas as pd
 
+_RANK_PATTERN = re.compile(r"^\d+(-Tie)?$")
+
 
 def _cluster_lines(words, tolerance=3):
-    """Groups words into text lines by vertical position (PDFs don't
-    label lines explicitly -- this reconstructs them from coordinates)."""
     lines = []
     for w in sorted(words, key=lambda w: w["top"]):
         placed = False
@@ -44,9 +47,8 @@ def _cluster_lines(words, tolerance=3):
 
 
 def _parse_dancer_block(lines):
-    """Turns 3 reconstructed text lines into dancer metadata. Returns None
-    for a block that doesn't match the expected shape (defensive -- so a
-    malformed block gets flagged rather than silently mis-parsed)."""
+    """Same 3-line dancer-info block shape as before: [number+name],
+    [rank-box+school], [points+qualifying status]."""
     if len(lines) != 3:
         return None
     try:
@@ -55,133 +57,213 @@ def _parse_dancer_block(lines):
         competitor_id = int(num_words[0]["text"])
         name = " ".join(w["text"] for w in text_words)
 
-        num_words = [w for w in lines[1] if w["x0"] < 60]
         text_words = [w for w in lines[1] if w["x0"] >= 70]
-        f_place_raw = num_words[0]["text"] if num_words else None
         school = " ".join(w["text"] for w in text_words)
 
-        num_words = [w for w in lines[2] if w["x0"] < 60]
-        text_words = [w for w in lines[2] if w["x0"] >= 70]
-        t_points_raw = num_words[0]["text"] if num_words else None
-        qualifying_status = " ".join(w["text"] for w in text_words)
-
-        return {
-            "competitor_id": competitor_id,
-            "name": name,
-            "team": school,
-            "f_place": f_place_raw,
-            "t_points": t_points_raw,
-            "qualifying_status": qualifying_status,
-        }
+        return {"competitor_id": competitor_id, "name": name, "team": school}
     except (IndexError, ValueError):
         return None
 
 
+def _find_x_clusters(candidates, tolerance=6, min_cluster_size=3):
+    """Returns every qualifying cluster's center, sorted left to right (not
+    just the chosen one) -- the caller needs to know whether a page shows
+    ONE cluster or several, since only a page with multiple competing
+    clusters can actually confirm which one is genuinely the rank column
+    (see parse_quickfeis_pdf for why that distinction matters)."""
+    centers = sorted((w["x0"] + w["x1"]) / 2 for w in candidates)
+    found = []
+    for c in centers:
+        cluster = [y for y in centers if abs(y - c) < tolerance]
+        if len(cluster) >= min_cluster_size:
+            mean = sum(cluster) / len(cluster)
+            if not any(abs(mean - f) < tolerance for f in found):
+                found.append(mean)
+    return sorted(found)
+
+
+def _dominant_x_cluster(candidates, tolerance=6, min_cluster_size=3):
+    """Returns the horizontal CENTER of the LEFTMOST cluster of candidate
+    words with at least `min_cluster_size` members.
+
+    WHY CENTER, NOT LEFT EDGE (x0): these are right-aligned-looking numeric
+    columns, but they're actually center-aligned within a fixed box width.
+    A single-digit rank ('1') and a wider one ('90-Tie') have very
+    different left edges (their box shrinks/grows from a shared center),
+    which previously caused a left-edge-based match to split what is
+    really one column into multiple false clusters. The center coordinate
+    stays essentially constant across 1-digit, 2-digit, and '-Tie'-suffixed
+    values alike -- verified directly against real data before switching
+    to it.
+
+    WHY LEFTMOST-AMONG-QUALIFYING-CLUSTERS, NOT SIMPLY LARGEST: on a page
+    where every competitor has a real final rank (no DNA rows), the rank
+    column and the always-numeric competitor-ID column next to it can be
+    the same size, so 'largest' doesn't reliably disambiguate them. The
+    rank column is reliably the leftmost of the two by this layout's
+    design, so once genuine one-off outliers are filtered by the minimum
+    cluster size, leftmost is the correct tiebreaker.
+    """
+    clusters = _find_x_clusters(candidates, tolerance, min_cluster_size)
+    if clusters:
+        return clusters[0]
+    centers = sorted((w["x0"] + w["x1"]) / 2 for w in candidates)
+    best = []
+    for c in centers:
+        cluster = [y for y in centers if abs(y - c) < tolerance]
+        if len(cluster) > len(best):
+            best = cluster
+    return sum(best) / len(best) if best else centers[0]
+
+
+def _judge_columns_for_page(page):
+    """Returns (judge_names_by_round, column_x) where judge_names_by_round
+    is [[round1 names...], [round2 names...], [round3 names...]] and
+    column_x is a list of (marks_x, place_x) per column position, both
+    length n_judges (panel size, detected dynamically -- not assumed)."""
+    tables = page.find_tables()
+    header = None
+    for t in tables:
+        if len(t.rows) == 3 and t.rows[0].cells and all(t.rows[0].cells):
+            header = t
+            break
+    if header is None:
+        return None, None
+    n_judges = len(header.rows[0].cells)
+
+    names_by_round = []
+    for row in header.rows:
+        names = []
+        for cell in row.cells:
+            names.append(page.crop(cell).extract_text().strip() if cell else None)
+        names_by_round.append(names)
+
+    header_bottom = header.bbox[3]
+    words = page.extract_words()
+    sub = [w for w in words if header_bottom < w["top"] < header_bottom + 30]
+    marks_x = sorted(w["x0"] for w in sub if w["text"] == "Marks")
+    place_x = sorted(w["x0"] for w in sub if w["text"] == "Place")
+    if len(marks_x) != n_judges or len(place_x) != n_judges:
+        return None, None
+    column_x = list(zip(marks_x, place_x))
+    return names_by_round, column_x
+
+
 def parse_quickfeis_pdf(pdf_path):
     """
-    Returns (rounds, competitor_index, warnings).
-
-    IMPORTANT STRUCTURAL POINT (found by testing against a real file):
-    lower-ranked competitors get "recalled" to fewer rounds than the top
-    competitors -- a real, standard part of how these competitions work,
-    not a data error. That means one competition isn't really one judge
-    panel scoring everyone; it's up to 3 SEPARATE panels (one per round),
-    each scoring only the competitors who made it that far. So this
-    function returns each round as its own clean, complete table --
-    exactly the (event_label, dataframe, judge_columns) shape our
-    single-event report already expects, and also exactly the shape our
-    multi-event competitor-watch tool expects if you feed it all 3 rounds
-    as if they were 3 "events" -- a natural way to check whether a
-    specific round-3 judge treated a specific competitor differently than
-    that same competitor's round-1/round-2 judges did.
-
-    `rounds` is a list of (round_label, scores_df, judge_columns) tuples.
-    `competitor_index` maps competitor_id -> {name, team, f_place, ...}
-    for use in reports (looked up once, not repeated per round).
-    `warnings` are plain-language strings about anything genuinely
-    unusual -- NOT including the normal "not recalled to this round"
-    case, which is expected and handled, not an error.
+    Returns (rounds, competitor_index, warnings) -- same shape as before.
+    See module docstring for what changed and why.
     """
     warnings = []
     competitor_index = {}
-    # per-round accumulation: round_idx -> list of {competitor_id, team, judge: mark}
     round_rows = {0: [], 1: [], 2: []}
     judge_names_by_round = None
+    column_x = None
+    known_rank_x = None  # persisted once confidently detected -- see below
 
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
             page_words = page.extract_words()
-            tables = page.find_tables()
-            if not tables:
-                continue
 
-            judge_header = None
-            data_tables = []
-            for t in tables:
-                if len(t.rows) == 3 and t.rows[0].cells and len(t.rows[0].cells) == 5:
-                    judge_header = t
-                else:
-                    data_tables.append(t)
-
-            if judge_header is not None:
-                names_by_round = []
-                for row in judge_header.rows:
-                    names = []
-                    for cell in row.cells:
-                        names.append(page.crop(cell).extract_text().strip() if cell else None)
-                    names_by_round.append(names)
-                judge_names_by_round = names_by_round
+            names, cols = _judge_columns_for_page(page)
+            if names is not None:
+                judge_names_by_round, column_x = names, cols
 
             if judge_names_by_round is None:
                 warnings.append(f"Page {page_num}: couldn't find the judge-name header; skipping this page.")
                 continue
 
-            row_tables = [t for t in data_tables if len(t.rows) == 1 and len(t.rows[0].cells) == 15]
-            if len(row_tables) % 3 != 0:
-                warnings.append(f"Page {page_num}: found {len(row_tables)} score rows, not a multiple of 3. "
-                                "Check this page manually.")
+            n_judges = len(column_x)
 
-            for i in range(0, len(row_tables) - len(row_tables) % 3, 3):
-                round_tables = row_tables[i:i + 3]
-                block_top = round_tables[0].rows[0].cells[0][1]
-                block_bottom = round_tables[2].rows[0].cells[0][3]
+            candidates = [w for w in page_words if 20 <= w["x0"] <= 100 and w["top"] > 90
+                         and _RANK_PATTERN.match(w["text"])]
+            if not candidates:
+                continue
 
-                left_words = [w for w in page_words
-                              if w["x0"] < 222 and block_top - 2 <= w["top"] <= block_bottom + 2]
-                meta = _parse_dancer_block(_cluster_lines(left_words))
+            # The rank-box column's position is a fixed layout property of the
+            # whole document, not something to re-guess from scratch on every
+            # page. Crucially, a page is only trusted to CONFIRM which cluster
+            # is the true rank column when it shows multiple competing
+            # clusters -- a page with only ONE cluster present (e.g. a page of
+            # nothing but "Did Not Attend" rows, where only the always-numeric
+            # competitor-ID column has any digits at all) can't actually prove
+            # anything, and blindly trusting it there previously caused the
+            # wrong column to silently override an already-correct one.
+            clusters = _find_x_clusters(candidates)
+            if len(clusters) >= 2:
+                known_rank_x = clusters[0]
+            elif known_rank_x is None and clusters:
+                known_rank_x = clusters[0]  # only choice available so far -- best effort
+            if known_rank_x is None:
+                continue
+            rank_x = known_rank_x
+
+            rank_words = sorted([w for w in candidates if abs((w["x0"] + w["x1"]) / 2 - rank_x) < 6],
+                                key=lambda w: w["top"])
+
+
+            for rw in rank_words:
+                rank_top = rw["top"]
+                name_words = [w for w in page_words if w["x0"] < 230 and -19 <= w["top"] - rank_top <= -8]
+                mid_words = [w for w in page_words if w["x0"] < 230 and -4 <= w["top"] - rank_top <= 4]
+                bottom_words = [w for w in page_words if w["x0"] < 230 and 8 <= w["top"] - rank_top <= 20]
+                meta = _parse_dancer_block([_cluster_lines(name_words)[0] if name_words else [],
+                                           _cluster_lines(mid_words)[0] if mid_words else [],
+                                           _cluster_lines(bottom_words)[0] if bottom_words else []])
                 if meta is None:
-                    warnings.append(f"Page {page_num}: couldn't read dancer info near y={block_top:.0f}; skipped.")
+                    # a page (or row) where the competitor "Did Not Attend" has no
+                    # real rank to anchor on -- checked for directly since different
+                    # events phrase this differently ("(DNA)" + "No Show", or "NS" +
+                    # "Did Not Attend") rather than an actual extraction failure
+                    nearby = [w for w in page_words if abs(w["top"] - rank_top) < 20]
+                    nearby_text = " ".join(w["text"] for w in nearby).upper()
+                    compact = nearby_text.replace(" ", "")
+                    if ("DNA" in nearby_text or "NOSHOW" in compact or "ATTEND" in nearby_text
+                            or re.search(r"\bNS\b", nearby_text)):
+                        continue  # did not attend -- correctly has no data to extract, not an error
+                    warnings.append(f"Page {page_num}: couldn't read dancer info near y={rank_top:.0f}; skipped.")
                     continue
                 cid = meta["competitor_id"]
                 competitor_index[cid] = meta
 
+                round_offsets = [(-19, -8), (-4, 4), (8, 20)]
                 did_not_attend = False
-                for round_idx, t in enumerate(round_tables):
-                    cells = t.rows[0].cells
+                for round_idx, (lo, hi) in enumerate(round_offsets):
+                    row_words = [w for w in page_words if w["x0"] > 230 and lo <= w["top"] - rank_top <= hi]
                     marks = {}
                     n_present, n_missing = 0, 0
-                    for pos_idx in range(5):
-                        judge_name = judge_names_by_round[round_idx][pos_idx]
-                        text = (page.crop(cells[pos_idx * 3]).extract_text() or "").strip()
-                        if text == "":
-                            n_missing += 1  # not recalled to this round -- expected, not an error
+                    for col_idx in range(n_judges):
+                        judge_name = judge_names_by_round[round_idx][col_idx]
+                        marks_x, place_x = column_x[col_idx]
+                        marks_word = next((w for w in row_words if abs(w["x0"] - marks_x) < 15), None)
+                        place_words = [w for w in row_words if abs(w["x0"] - place_x) < 25]
+                        place_text = "".join(w["text"] for w in place_words)
+
+                        valid_rank = bool(_RANK_PATTERN.match(place_text))
+                        if not valid_rank:
+                            n_missing += 1
+                            if place_text.replace(" ", "").upper() in ("NOSHOW",):
+                                did_not_attend = True
                             continue
-                        if text.upper() == "NS":
-                            did_not_attend = True
+                        if marks_word is None:
+                            n_missing += 1
+                            warnings.append(f"Page {page_num}: competitor {cid} round {round_idx+1} judge "
+                                            f"'{judge_name}' has a rank but no readable mark; check manually.")
                             continue
                         try:
-                            marks[judge_name] = float(text)
+                            marks[judge_name] = float(marks_word["text"])
                             n_present += 1
                         except ValueError:
-                            warnings.append(f"Page {page_num}: unreadable mark '{text}' for competitor {cid}, "
-                                            f"round {round_idx+1}, judge '{judge_name}'. Left blank -- check this cell.")
+                            n_missing += 1
+                            warnings.append(f"Page {page_num}: unreadable mark '{marks_word['text']}' for "
+                                            f"competitor {cid}, round {round_idx+1}, judge '{judge_name}'.")
 
                     if did_not_attend:
                         continue
-                    if 0 < n_present < 5:
-                        warnings.append(f"Competitor {cid}, round {round_idx+1}: only {n_present} of 5 judges' "
-                                        "marks were readable (expected 0 or 5). Check this competitor's row manually.")
-                    if n_present == 5:
+                    if 0 < n_present < n_judges:
+                        warnings.append(f"Competitor {cid}, round {round_idx+1}: only {n_present} of {n_judges} "
+                                        "judges' marks were readable. Check this competitor's row manually.")
+                    if n_present == n_judges:
                         row = {"competitor_id": cid, "name": meta["name"], "team": meta["team"]}
                         row.update(marks)
                         round_rows[round_idx].append(row)
@@ -216,4 +298,3 @@ if __name__ == "__main__":
             print(" -", w)
     else:
         print("\nNo warnings.")
-

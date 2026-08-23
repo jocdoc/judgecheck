@@ -18,8 +18,10 @@ class UnrecognizedFormatError(Exception):
 def detect_format(pdf_path):
     with pdfplumber.open(pdf_path) as pdf:
         first_page_text = pdf.pages[0].extract_text() or ""
-        # QuickFeis: "FINAL RESULTS for:" header with a round/judge grid on page 1
-        if "FINAL RESULTS for" in first_page_text and "dancers competed" in first_page_text:
+        # QuickFeis: branded footer + "dancers competed" appears on every variant seen so
+        # far (title text itself varies -- "FINAL RESULTS for:" in one real sample,
+        # "Solo Championship Final Report" in another -- so don't key off that alone)
+        if "QuickFeis" in first_page_text and "dancers competed" in first_page_text:
             return "quickfeis"
         # feisresults.com: an "Adjudicators" cover page, RECALL/FINAL MARKS tables follow
         if "Adjudicators" in first_page_text:
