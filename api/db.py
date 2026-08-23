@@ -206,6 +206,36 @@ def count_events_for_judge(judge_name):
         conn.close()
 
 
+def judge_experience_percentile(judge_name):
+    """Gives 'N events on record' real context by comparing it against
+    every other judge in the archive -- the same idea already used in the
+    single-event report, which shows each panel judge's own prior-event
+    count side by side for comparison, just extended to the WHOLE judge
+    pool instead of just the judges on one panel.
+
+    One GROUP BY over the whole marks table, not a per-judge loop -- gets
+    every judge's event count in a single query, then this judge's
+    percentile is trivial arithmetic in Python. Uses idx_marks_judge.
+
+    Returns (n_events, percentile, n_judges_in_archive). percentile is None
+    if the archive has no judges on record at all yet (can't rank against
+    an empty pool)."""
+    conn = _connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT judge_name, COUNT(DISTINCT event_id) FROM marks GROUP BY judge_name")
+            counts = dict(cur.fetchall())
+    finally:
+        conn.close()
+    target = counts.get(judge_name, 0)
+    if not counts:
+        return target, None, 0
+    n_judges = len(counts)
+    n_at_or_below = sum(1 for n in counts.values() if n <= target)
+    percentile = round(n_at_or_below / n_judges * 100)
+    return target, percentile, n_judges
+
+
 def fetch_rounds_for_judge(judge_name):
     conn = _connection()
     try:
