@@ -301,3 +301,60 @@ awareness into the single-event report. The next step would be a dedicated
 page reusing `judge_archive_badge()` (or a bulk variant of it) across every
 judge in the archive at once, rather than one PDF's worth of judges at a
 time.
+
+## Archive search now suggests close matches (fix)
+
+Reported live: searching the archive for "Aaron Crosby" returned "No history
+found" even though the archive had "Aaron Crosbie" (one-letter difference,
+"-y" vs "-ie"). The search was always exact-match by design — but with no
+fallback, any spelling variance across years of differently-transcribed PDFs
+would silently dead-end.
+
+Fixed with `db.fuzzy_match_names()`, which deliberately does NOT use SQL
+substring matching (`ILIKE`) — tested and confirmed that approach wouldn't
+have caught this exact case, since "Aaron Crosby" isn't a substring of
+"Aaron Crosbie". It uses Python's stdlib `difflib` for character-level
+similarity instead, fetching the full distinct-name list for the relevant
+column (judges/schools/competitors across a multi-year archive is
+realistically in the hundreds, not enough to need a database fuzzy-search
+extension) and ranking by similarity in Python.
+
+A search with no exact match now returns up to 5 close-match suggestions as
+clickable chips ("Did you mean: Aaron Crosbie") instead of a dead end.
+Confirmed both paths through the real browser: a close match found (chip
+shown, clicking it re-runs the search with the corrected name) and a
+genuine no-match case (plain message, no suggestions box).
+
+## Archive search: real bug found and fixed (float vs Decimal)
+
+The improved error handling from the previous fix immediately paid off — it
+surfaced the actual cause instead of a dead end: `TypeError: unsupported
+operand type(s) for -: 'float' and 'decimal.Decimal'`, identical across all
+three search kinds (judge/school/competitor), confirming a single shared
+root cause rather than three separate bugs.
+
+**Root cause:** Postgres's `NUMERIC` column type (used for `mark` in the
+schema) comes back from psycopg2 as Python's `decimal.Decimal`, not `float`.
+Every statistics function in this project assumes plain floats, and mixing
+the two in arithmetic raises exactly this error. This affected every
+archive read path uniformly, since they all reconstruct rounds through the
+same function, `_pivot_long_to_wide()` in `db.py`.
+
+**Fix:** cast the mark column to float once, at that single shared
+reconstruction point, rather than downstream in every statistics function
+that touches archive data. Verified directly with real `decimal.Decimal`
+values (not just floats) through the full pipeline: the pivot itself, full
+`competitor_watch`/`team_watch` statistics, `render_history_report`, and
+the single-event archive cross-reference feature (`judge_archive_badge`) --
+confirmed that one wasn't reported broken but shared the same underlying
+function, so it needed the same verification.
+
+Worth noting for next time: this bug existed in every archive read function
+from the point they were first built, but was never caught locally because
+every local/sandbox test used mocked Python data (plain floats or numbers
+built directly in Python), never real values round-tripped through an
+actual Postgres connection -- which is the only way `decimal.Decimal` shows
+up. There isn't a live database reachable from the development sandbox, so
+this category of bug can only really be caught on a real deploy. Worth
+remembering as a class of thing to watch for again if a new archive
+function is added later.

@@ -169,6 +169,10 @@ table.preview-table tr:nth-child(even) td{background:#FAFAF8}
       <span class="spinner" id="archiveSpinner">searching archive&hellip;</span>
     </div>
     <div class="error" id="archiveErrorBox"></div>
+    <div id="archiveSuggestions" style="display:none;margin-top:10px;padding:12px 14px;background:var(--paper);border:1px solid var(--line);border-radius:8px;font-size:13.5px;">
+      <span style="color:var(--ink-soft);">No exact match. Did you mean:</span>
+      <div id="archiveSuggestionChips" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;"></div>
+    </div>
   </div>
 
   <div class="upload-card" id="bulkImportCard">
@@ -537,6 +541,8 @@ function resetAll(){
   document.getElementById('uploadCard').style.display = 'block';
   document.getElementById('archiveSearchCard').style.display = 'block';
   document.getElementById('bulkImportCard').style.display = 'block';
+  document.getElementById('archiveSuggestions').style.display = 'none';
+  document.getElementById('archiveErrorBox').style.display = 'none';
   window.scrollTo({top:0, behavior:'smooth'});
 }
 document.getElementById('resetBtn').addEventListener('click', resetAll);
@@ -544,7 +550,9 @@ document.getElementById('resetBtn').addEventListener('click', resetAll);
 // ---------- Archive search ----------
 async function runArchiveSearch(){
   const errBox = document.getElementById('archiveErrorBox');
+  const suggBox = document.getElementById('archiveSuggestions');
   errBox.style.display = 'none';
+  suggBox.style.display = 'none';
   const kind = document.getElementById('archiveSearchKind').value;
   const name = document.getElementById('archiveSearchName').value.trim();
   if (!name) { errBox.textContent = 'Enter a name to search for.'; errBox.style.display = 'block'; return; }
@@ -561,6 +569,29 @@ async function runArchiveSearch(){
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Search failed.');
+
+    if (data.no_results) {
+      if (data.suggestions && data.suggestions.length) {
+        const chipsEl = document.getElementById('archiveSuggestionChips');
+        chipsEl.innerHTML = '';
+        data.suggestions.forEach(name => {
+          const chip = document.createElement('button');
+          chip.className = 'btn btn-ghost';
+          chip.style.cssText = 'padding:6px 12px;font-size:13px;';
+          chip.textContent = name;
+          chip.addEventListener('click', () => {
+            document.getElementById('archiveSearchName').value = name;
+            runArchiveSearch();
+          });
+          chipsEl.appendChild(chip);
+        });
+        suggBox.style.display = 'block';
+      } else {
+        errBox.textContent = `No history found for "${data.subject_name}". It may not be in the archive yet.`;
+        errBox.style.display = 'block';
+      }
+      return;
+    }
     showReport(data);
   } catch (err) {
     errBox.textContent = err.message;

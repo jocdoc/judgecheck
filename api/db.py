@@ -143,6 +143,14 @@ def _pivot_long_to_wide(rows, event_title, round_label):
     if not rows:
         return None
     long_df = pd.DataFrame(rows, columns=["competitor_id", "name", "team", "judge", "mark"])
+    # The mark column arrives as psycopg2's mapping of Postgres NUMERIC -- Python's
+    # decimal.Decimal, not float. Confirmed live: every statistics function downstream
+    # assumes plain floats and mixing the two raises "unsupported operand type(s) for
+    # -: 'float' and 'decimal.Decimal'" the moment any arithmetic touches archive data
+    # (which is every archive search, hence all three kinds failing identically).
+    # Cast right here, once, at the single point every archive query reconstructs
+    # through, rather than downstream in each statistics function.
+    long_df["mark"] = long_df["mark"].astype(float)
     judge_cols = sorted(long_df["judge"].unique().tolist())
     wide = long_df.pivot_table(index=["competitor_id", "name", "team"], columns="judge",
                                values="mark", aggfunc="first").reset_index()
@@ -273,3 +281,31 @@ def search_names(prefix, kind="competitor_name", limit=15):
             return [r[0] for r in cur.fetchall()]
     finally:
         conn.close()
+
+
+def fuzzy_match_names(query, kind="judge_name", limit=5):
+    """
+    'Did you mean' suggestions for a search that found no exact match.
+    Deliberately NOT built on SQL substring matching (ILIKE) -- a real
+    case that came up confirmed why: searching "Aaron Crosby" should
+    suggest "Aaron Crosbie", but "Aaron Crosby" isn't a substring of
+    "Aaron Crosbie" (the "-y" vs "-ie" ending breaks it), so ILIKE '%Aaron
+    Crosby%' finds nothing. Character-level similarity (Python's stdlib
+    difflib) correctly catches a one-letter spelling difference like this
+    where substring matching can't. The full distinct-name list for one
+    column is fetched and compared in Python rather than attempting this
+    in SQL -- for an archive of judges/schools spanning years of events,
+    that list is realistically in the hundreds, not large enough to
+    justify a fuzzy-search Postgres extension (pg_trgm) for this.
+    """
+    if kind not in ("competitor_name", "judge_name", "team"):
+        raise ValueError("invalid search kind")
+    from difflib import get_close_matches
+    conn = _connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT DISTINCT {kind} FROM marks WHERE {kind} != '' LIMIT 5000")
+            all_names = [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
+    return get_close_matches(query, all_names, n=limit, cutoff=0.6)
