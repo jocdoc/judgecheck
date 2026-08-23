@@ -7,8 +7,8 @@ recognize this."
 
 import pdfplumber
 
-from quickfeis_parser import parse_quickfeis_pdf
-from feisresults_parser import parse_feisresults_pdf
+from .quickfeis_parser import parse_quickfeis_pdf
+from .feisresults_parser import parse_feisresults_pdf
 
 
 class UnrecognizedFormatError(Exception):

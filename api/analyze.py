@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats as sstats
 
-from pdf_parsers import parse_results_pdf, UnrecognizedFormatError
+from .pdf_parsers import parse_results_pdf, UnrecognizedFormatError
 
 MAX_FILES = 12
 MAX_COMPETITORS = 500
