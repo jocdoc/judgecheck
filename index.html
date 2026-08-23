@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JudgeCheck — Independent scoring review for judged sports</title>
+<meta name="description" content="Upload your competition score sheet and get a plain-language statistical review of judging consistency — no statistics degree required.">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,500&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+:root{
+  --paper:#EFF1EC; --paper-raised:#F8F9F6; --ink:#1E2A3A; --ink-soft:#55606F;
+  --brass:#B08D3E; --line:#D8D9D2; --clear:#3F7A5B; --clear-bg:#E4EFE8;
+  --caution:#C1792E; --caution-bg:#F5E8D8; --flag:#A23B34; --flag-bg:#F3E1DF; --dot-off:#D9DBD3;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:'Instrument Sans',sans-serif;line-height:1.5}
+.wrap{max-width:760px;margin:0 auto;padding:0 20px}
+
+header{padding:56px 0 40px;position:relative;overflow:hidden}
+.brand{font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--brass);margin:0 0 18px}
+h1{font-family:'Fraunces',serif;font-weight:600;font-size:clamp(34px,6vw,46px);line-height:1.08;letter-spacing:-.015em;margin:0 0 16px;max-width:12em}
+h1 em{font-style:italic;font-weight:500;color:var(--clear)}
+.lede{font-size:17px;color:var(--ink-soft);max-width:34em;margin:0 0 8px}
+
+.hero-dots{position:absolute;right:-30px;top:40px;width:280px;display:grid;grid-template-columns:repeat(20,1fr);gap:3px;opacity:.55;pointer-events:none}
+.hero-dots span{aspect-ratio:1;border-radius:1.5px;background:var(--dot-off)}
+.hero-dots span.lit{background:var(--flag)}
+@media (max-width:760px){.hero-dots{display:none}}
+
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:8px 0 40px}
+@media (max-width:640px){.steps{grid-template-columns:1fr}}
+.step{background:var(--paper-raised);border:1px solid var(--line);border-radius:10px;padding:16px}
+.step h3{font-family:'Fraunces',serif;font-weight:600;font-size:15.5px;margin:0 0 6px}
+.step p{font-size:13px;color:var(--ink-soft);margin:0}
+.step .k{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--brass);letter-spacing:.1em;display:block;margin-bottom:8px}
+
+.upload-card{background:var(--paper-raised);border:1px solid var(--line);border-radius:12px;padding:26px;margin-bottom:18px}
+.upload-card h2{font-family:'Fraunces',serif;font-weight:600;font-size:20px;margin:0 0 4px}
+.upload-sub{font-size:13.5px;color:var(--ink-soft);margin:0 0 18px}
+.dropzone{border:2px dashed var(--line);border-radius:10px;padding:34px 20px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s}
+.dropzone:hover,.dropzone.dragover{border-color:var(--brass);background:#FBFBF8}
+.dropzone p{margin:0;font-size:14.5px}
+.dropzone .hint{font-size:12.5px;color:var(--ink-soft);margin-top:6px}
+.dropzone .hint b{color:var(--ink)}
+#fileInput{display:none}
+
+.file-list{margin:14px 0 0;padding:0;list-style:none}
+.file-list li{display:flex;justify-content:space-between;align-items:center;font-size:13.5px;padding:8px 10px;border:1px solid var(--line);border-radius:7px;margin-bottom:6px;background:#fff}
+.file-list .fname{font-family:'IBM Plex Mono',monospace;font-size:12.5px}
+.file-list button{background:none;border:none;color:var(--flag);cursor:pointer;font-size:12px;font-family:'Instrument Sans',sans-serif}
+
+.mode-note{font-size:12.5px;color:var(--ink-soft);margin:12px 0 0;padding:10px 12px;background:var(--paper);border-radius:7px;border:1px solid var(--line)}
+.mode-note b{color:var(--ink)}
+
+.actions{display:flex;gap:12px;align-items:center;margin-top:18px;flex-wrap:wrap}
+.btn{font-family:'Instrument Sans',sans-serif;font-weight:600;font-size:14.5px;border:none;border-radius:8px;padding:12px 22px;cursor:pointer}
+.btn-primary{background:var(--ink);color:var(--paper)}
+.btn-primary:hover{background:#2C3B50}
+.btn-primary:disabled{background:var(--line);color:var(--ink-soft);cursor:not-allowed}
+.btn-ghost{background:none;border:1px solid var(--line);color:var(--ink)}
+.btn-ghost:hover{border-color:var(--brass)}
+
+.error{background:var(--flag-bg);border:1px solid var(--flag);color:var(--flag);border-radius:8px;padding:12px 14px;font-size:13.5px;margin-top:14px;display:none}
+.spinner{display:none;font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--ink-soft)}
+.spinner.on{display:inline}
+
+/* ---------- preview / edit step ---------- */
+#previewArea{display:none;margin-bottom:40px}
+.preview-header{background:var(--paper-raised);border:1px solid var(--line);border-radius:12px;padding:22px 26px;margin-bottom:16px}
+.preview-header h2{font-family:'Fraunces',serif;font-weight:600;font-size:19px;margin:0 0 4px}
+.preview-sub{font-size:13px;color:var(--ink-soft);margin:0}
+.preview-sub b{color:var(--ink)}
+.warn-list{margin:14px 0 0;padding:12px 14px;background:var(--caution-bg);border:1px solid var(--caution);border-radius:8px;font-size:12.5px;line-height:1.5}
+.warn-list summary{cursor:pointer;font-weight:600;color:var(--caution)}
+.warn-list ul{margin:8px 0 0;padding-left:18px}
+
+.round-block{background:var(--paper-raised);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:16px;overflow:hidden}
+.round-block h3{font-family:'Fraunces',serif;font-weight:600;font-size:16px;margin:0 0 10px}
+.table-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:8px;max-height:420px;overflow-y:auto}
+table.preview-table{border-collapse:collapse;width:100%;font-size:12.5px;background:#fff}
+table.preview-table th{position:sticky;top:0;background:var(--ink);color:var(--paper);font-family:'IBM Plex Mono',monospace;font-weight:500;font-size:11px;letter-spacing:.03em;padding:8px 10px;text-align:left;white-space:nowrap;z-index:1}
+table.preview-table td{padding:5px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+table.preview-table td.readonly{color:var(--ink-soft);font-family:'IBM Plex Mono',monospace}
+table.preview-table input{width:64px;border:1px solid transparent;border-radius:4px;padding:3px 5px;font-family:'IBM Plex Mono',monospace;font-size:12px;background:transparent}
+table.preview-table input:hover{border-color:var(--line)}
+table.preview-table input:focus{border-color:var(--brass);background:#fff;outline:none}
+table.preview-table input.edited{background:var(--caution-bg);border-color:var(--caution)}
+table.preview-table tr:nth-child(even) td{background:#FAFAF8}
+
+.preview-actions{display:flex;gap:12px;align-items:center;margin-top:18px;flex-wrap:wrap}
+
+/* ---------- report area ---------- */
+#reportArea{display:none;margin-bottom:40px}
+#reportFrame{width:100%;border:1px solid var(--line);border-radius:12px;background:#fff;min-height:600px}
+.report-actions{display:flex;gap:12px;margin:12px 0 0}
+
+.site-footer{border-top:1px solid var(--line);padding:24px 0 48px;font-size:12px;color:var(--ink-soft);line-height:1.6}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <p class="brand">JudgeCheck</p>
+    <div class="hero-dots" id="heroDots"></div>
+    <h1>Are the scores fair? <em>Check the math.</em></h1>
+    <p class="lede">Upload a score sheet from any judged competition and get a plain-language
+    statistical review: does any judge's scoring break from the panel by more than honest
+    differences of opinion can explain?</p>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <div class="steps">
+    <div class="step"><span class="k">STEP 1</span><h3>Upload</h3>
+      <p>CSV, Excel, or a results PDF from QuickFeis or feisresults.com.</p></div>
+    <div class="step"><span class="k">STEP 2</span><h3>Review the extraction</h3>
+      <p>PDFs show an editable table first — check it against the source before anything is analyzed.</p></div>
+    <div class="step"><span class="k">STEP 3</span><h3>Read the verdict</h3>
+      <p>Clear, Second Look, or Flagged — with the honest odds shown as something you can count.</p></div>
+  </div>
+
+  <div class="upload-card" id="uploadCard">
+    <h2>Run a review</h2>
+    <p class="upload-sub">Files are analyzed in memory and never stored.</p>
+
+    <div class="dropzone" id="dropzone">
+      <p>Drag a score sheet here, or click to choose</p>
+      <p class="hint"><b>.csv</b>, <b>.xlsx</b>, or <b>.pdf</b> &middot; PDFs: one competition's results file
+      (QuickFeis or feisresults.com format)</p>
+    </div>
+    <input type="file" id="fileInput" multiple accept=".csv,.xlsx,.xls,.pdf">
+
+    <ul class="file-list" id="fileList"></ul>
+    <div class="mode-note" id="modeNote" style="display:none"></div>
+
+    <div class="actions">
+      <button class="btn btn-primary" id="analyzeBtn" disabled>Continue</button>
+      <button class="btn btn-ghost" id="templateBtn">Download CSV template</button>
+      <span class="spinner" id="spinner">reading file&hellip;</span>
+    </div>
+    <div class="error" id="errorBox"></div>
+  </div>
+
+  <div id="previewArea"></div>
+
+  <div id="reportArea">
+    <iframe id="reportFrame" title="Analysis report"></iframe>
+    <div class="report-actions">
+      <button class="btn btn-ghost" id="downloadBtn">Download report</button>
+      <button class="btn btn-ghost" id="resetBtn">Start over</button>
+    </div>
+  </div>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    JudgeCheck is a statistical screening tool, not proof of misconduct. It measures how unusual
+    a scoring pattern is compared to chance; it cannot know why a pattern exists. Results should
+    prompt review by the appropriate governing body — never punishment on their own. Uploaded
+    files are processed in memory and are not stored. PDF extraction can make mistakes — always
+    check the preview table against your source document before running the analysis.
+  </div>
+</footer>
+
+<script>
+(function(){
+  const grid = document.getElementById('heroDots');
+  const lit = new Set();
+  while (lit.size < 6) lit.add(Math.floor(Math.random()*200));
+  let html = '';
+  for (let i=0;i<200;i++) html += '<span class="'+(lit.has(i)?'lit':'')+'"></span>';
+  grid.innerHTML = html;
+})();
+
+let files = [];
+const MAX_FILES = 12, MAX_BYTES = 5*1024*1024;
+
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const fileList = document.getElementById('fileList');
+const modeNote = document.getElementById('modeNote');
+const analyzeBtn = document.getElementById('analyzeBtn');
+const errorBox = document.getElementById('errorBox');
+const spinner = document.getElementById('spinner');
+
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+dropzone.addEventListener('drop', e => { e.preventDefault(); dropzone.classList.remove('dragover'); addFiles(e.dataTransfer.files); });
+fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value=''; });
+
+function showError(msg){ errorBox.textContent = msg; errorBox.style.display = 'block'; }
+function clearError(){ errorBox.style.display = 'none'; }
+
+function addFiles(selected){
+  clearError();
+  const isPdf = f => /\.pdf$/i.test(f.name);
+  const incoming = Array.from(selected);
+  if (incoming.some(isPdf) && (incoming.length > 1 || files.length > 0)) {
+    showError('PDFs are analyzed one at a time. Remove other files first, or choose a single PDF.');
+    return;
+  }
+  for (const f of incoming){
+    if (files.length >= MAX_FILES) { showError('Maximum '+MAX_FILES+' files.'); break; }
+    if (f.size > MAX_BYTES) { showError('"'+f.name+'" is over 5 MB.'); continue; }
+    if (!/\.(csv|xlsx|xls|pdf)$/i.test(f.name)) { showError('"'+f.name+'": only .csv, .xlsx, or .pdf files.'); continue; }
+    if (isPdf(f) && files.length > 0) { showError('PDFs are analyzed one at a time.'); continue; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      files.push({ name: f.name, content: reader.result.split(',')[1] });
+      renderFiles();
+    };
+    reader.readAsDataURL(f);
+  }
+}
+
+function renderFiles(){
+  fileList.innerHTML = files.map((f,i) =>
+    '<li><span class="fname">'+f.name+'</span><button onclick="removeFile('+i+')">remove</button></li>'
+  ).join('');
+  analyzeBtn.disabled = files.length === 0;
+  if (files.length === 0){ modeNote.style.display='none'; }
+  else if (files.length === 1 && /\.pdf$/i.test(files[0].name)){
+    modeNote.style.display='block';
+    modeNote.innerHTML = 'PDF selected &rarr; extracted data will be shown for review before analysis.';
+  } else if (files.length === 1){
+    modeNote.style.display='block';
+    modeNote.innerHTML = 'One file selected &rarr; <b>single-event judge review</b>.';
+  } else {
+    modeNote.style.display='block';
+    modeNote.innerHTML = files.length+' files selected &rarr; <b>multi-event competitor watch list</b>. '+
+      'Each file is treated as one event; competitor IDs must mean the same person in every file.';
+  }
+}
+window.removeFile = i => { files.splice(i,1); renderFiles(); };
+
+document.getElementById('templateBtn').addEventListener('click', () => {
+  const csv = 'competitor_id,team,Judge A,Judge B,Judge C,Judge D,Judge E\n' +
+    Array.from({length:10},(_,i)=>(i+1)+',Team '+String.fromCharCode(65+(i%3))+',,,,,').join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'judgecheck_template.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+let lastReportHtml = null;
+let currentPreview = null; // {format, title, rounds, warnings}
+
+analyzeBtn.addEventListener('click', async () => {
+  clearError();
+  analyzeBtn.disabled = true;
+  spinner.classList.add('on');
+  try {
+    const res = await fetch('/api/analyze', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ files })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Analysis failed.');
+    if (data.preview) {
+      currentPreview = data;
+      renderPreview(data);
+      document.getElementById('uploadCard').style.display = 'none';
+      document.getElementById('previewArea').style.display = 'block';
+      document.getElementById('previewArea').scrollIntoView({behavior:'smooth'});
+    } else {
+      showReport(data);
+    }
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    analyzeBtn.disabled = files.length === 0;
+    spinner.classList.remove('on');
+  }
+});
+
+function showReport(data){
+  lastReportHtml = data.html;
+  const frame = document.getElementById('reportFrame');
+  frame.srcdoc = data.html;
+  document.getElementById('reportArea').style.display = 'block';
+  document.getElementById('previewArea').style.display = 'none';
+  frame.onload = () => { try { frame.style.height = (frame.contentDocument.body.scrollHeight + 40) + 'px'; } catch(e){} };
+  document.getElementById('reportArea').scrollIntoView({behavior:'smooth'});
+}
+
+// ---------- PDF preview / edit grid ----------
+function renderPreview(data){
+  const area = document.getElementById('previewArea');
+  const warnHtml = data.warnings && data.warnings.length
+    ? '<details class="warn-list" open><summary>'+data.warnings.length+' thing(s) worth checking</summary>'
+      + '<ul>'+data.warnings.map(w => '<li>'+escapeHtml(w)+'</li>').join('')+'</ul></details>'
+    : '';
+
+  let html = '<div class="preview-header">'
+    + '<h2>Review extracted data</h2>'
+    + '<p class="preview-sub">Detected format: <b>'+escapeHtml(data.format)+'</b>. '
+    + 'Compare the numbers below against your source PDF. Click any score to correct it before running the analysis.</p>'
+    + warnHtml
+    + '</div>';
+
+  data.rounds.forEach((round, ri) => {
+    html += '<div class="round-block" data-round="'+ri+'">'
+      + '<h3>'+escapeHtml(round.label)+' <span style="color:var(--ink-soft);font-weight:400;font-size:13px;">'
+      + '('+round.rows.length+' competitors, '+round.judges.length+' judges)</span></h3>'
+      + '<div class="table-scroll"><table class="preview-table"><thead><tr>'
+      + '<th>ID</th><th>Team</th>'
+      + round.judges.map(j => '<th>'+escapeHtml(j)+'</th>').join('')
+      + '</tr></thead><tbody>'
+      + round.rows.map((row, rowi) => {
+          return '<tr>'
+            + '<td class="readonly">'+row.competitor_id+'</td>'
+            + '<td class="readonly">'+escapeHtml(row.team||'')+'</td>'
+            + round.judges.map(j => {
+                const v = row.marks[j];
+                const val = (v === null || v === undefined) ? '' : v;
+                return '<td><input type="number" step="0.01" value="'+val+'" '
+                  + 'data-round="'+ri+'" data-row="'+rowi+'" data-judge="'+escapeAttr(j)+'" '
+                  + 'onchange="markEdited(this)"></td>';
+              }).join('')
+            + '</tr>';
+        }).join('')
+      + '</tbody></table></div></div>';
+  });
+
+  html += '<div class="preview-actions">'
+    + '<button class="btn btn-primary" id="confirmBtn">Looks good — run analysis</button>'
+    + '<button class="btn btn-ghost" id="cancelPreviewBtn">Start over</button>'
+    + '<span class="spinner" id="confirmSpinner">running 1,000 reshuffles&hellip;</span>'
+    + '</div><div class="error" id="previewError"></div>';
+
+  area.innerHTML = html;
+  document.getElementById('confirmBtn').addEventListener('click', submitConfirmedRounds);
+  document.getElementById('cancelPreviewBtn').addEventListener('click', resetAll);
+}
+
+window.markEdited = function(input){ input.classList.add('edited'); };
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
+
+async function submitConfirmedRounds(){
+  const errBox = document.getElementById('previewError');
+  errBox.style.display = 'none';
+  const confirmBtn = document.getElementById('confirmBtn');
+  const spin = document.getElementById('confirmSpinner');
+  confirmBtn.disabled = true;
+  spin.classList.add('on');
+
+  try {
+    const rounds = currentPreview.rounds.map((round, ri) => {
+      const inputs = document.querySelectorAll('input[data-round="'+ri+'"]');
+      const byRow = {};
+      inputs.forEach(inp => {
+        const rowi = inp.getAttribute('data-row');
+        const judge = inp.getAttribute('data-judge');
+        byRow[rowi] = byRow[rowi] || {};
+        byRow[rowi][judge] = inp.value === '' ? null : parseFloat(inp.value);
+      });
+      return {
+        label: round.label,
+        judges: round.judges,
+        rows: round.rows.map((row, rowi) => ({
+          competitor_id: row.competitor_id,
+          team: row.team,
+          marks: byRow[rowi] || row.marks
+        }))
+      };
+    });
+
+    const res = await fetch('/api/analyze', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ confirmed_rounds: rounds, title: currentPreview.title })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Analysis failed.');
+    showReport(data);
+  } catch (err) {
+    errBox.textContent = err.message;
+    errBox.style.display = 'block';
+  } finally {
+    confirmBtn.disabled = false;
+    spin.classList.remove('on');
+  }
+}
+
+document.getElementById('downloadBtn').addEventListener('click', () => {
+  if (!lastReportHtml) return;
+  const blob = new Blob([lastReportHtml], {type:'text/html'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'judgecheck_report.html';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+function resetAll(){
+  files = []; renderFiles(); lastReportHtml = null; currentPreview = null;
+  document.getElementById('reportArea').style.display = 'none';
+  document.getElementById('previewArea').style.display = 'none';
+  document.getElementById('previewArea').innerHTML = '';
+  document.getElementById('uploadCard').style.display = 'block';
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+document.getElementById('resetBtn').addEventListener('click', resetAll);
+</script>
+</body>
+</html>
