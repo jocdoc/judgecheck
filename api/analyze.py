@@ -162,6 +162,61 @@ def competitor_watch(events, min_shared_events=3, q_threshold=0.10):
                                     "competitor_id": match_method_counts.get("competitor_id", 0)}
 
 
+def team_watch(events, min_observations=5, q_threshold=0.10):
+    """
+    Cross-event version of the single-event team-bias check: does a specific
+    judge consistently score a specific SCHOOL's competitors higher or lower
+    than the rest of the panel, pooled across every uploaded event?
+
+    WHY THIS EXISTS SEPARATELY FROM competitor_watch: that function needs the
+    SAME PERSON to reappear across multiple SEPARATE events to build up
+    enough history -- which is the right question for "does this judge
+    target this dancer over time," but gives a useless answer (zero shared
+    people) when someone uploads several DIFFERENT divisions from the SAME
+    event, since a U16 dancer and a U17 dancer are different people by
+    definition. A school, though, typically has multiple dancers spread
+    across several divisions at one event, and the same judge often judges
+    more than one of those divisions -- so a team has enough data to check
+    even when no individual competitor does. `min_observations` counts
+    individual competitor encounters, not separate events, since several
+    team members in a single event already provide independent data points.
+    """
+    rows = []
+    for label, df, judge_cols in events:
+        if "team" not in df.columns:
+            continue
+        normalized = normalize_scores(df, judge_cols)
+        for judge in judge_cols:
+            other = [j for j in judge_cols if j != judge]
+            gap = normalized[judge] - normalized[other].mean(axis=1)
+            for i in range(len(df)):
+                team = str(df["team"].iloc[i]) if pd.notna(df["team"].iloc[i]) else ""
+                if not team:
+                    continue
+                rows.append({"team": team, "judge": judge, "gap": float(gap.iloc[i]), "event": label})
+    history = pd.DataFrame(rows)
+    if history.empty:
+        return [], 0
+
+    results = []
+    for (team, judge), grp in history.groupby(["team", "judge"]):
+        if len(grp) < min_observations:
+            continue
+        gaps = grp["gap"].values
+        _, p = sstats.ttest_1samp(gaps, popmean=0.0)
+        results.append({"team": team, "judge": judge, "n_competitors": len(grp),
+                        "n_events": grp["event"].nunique(), "avg_gap": float(gaps.mean()),
+                        "direction": "favored" if gaps.mean() > 0 else "punished", "p": float(p)})
+    if not results:
+        return [], 0
+    q = benjamini_hochberg([r["p"] for r in results])
+    for r, qv in zip(results, q):
+        r["q"] = float(qv)
+        r["flagged"] = bool(qv < q_threshold)
+    results.sort(key=lambda r: r["q"])
+    return results, len(results)
+
+
 # ===========================================================================
 # CSV/XLSX PARSING AND VALIDATION (unchanged from v1)
 # ===========================================================================
@@ -398,7 +453,7 @@ def render_watch_report(events, title):
                    'fallback is marked below.</p>')
 
     if not flagged:
-        body = (f'<div class="clear-banner">No consistent pattern found.'
+        competitor_body = (f'<div class="clear-banner">No consistent pattern found.'
                 f'<span>{mode_note}, across {n_events} events. A single unusual event for one '
                 'competitor isn\'t enough to flag on its own.</span></div>' + id_note)
     else:
@@ -418,18 +473,61 @@ def render_watch_report(events, title):
                 f'<p class="watch-detail">Across their shared events, <b>{r["judge"]}</b> consistently {verb} '
                 f'than the rest of the panel did. Estimated chance this is a false alarm: <b>{r["q"]*100:.1f}%</b>.'
                 f'{method_note}</p></div>')
-        body = (f'<p class="subtitle" style="border-bottom:none;padding-bottom:0;">{mode_note}, '
+        competitor_body = (f'<p class="subtitle" style="border-bottom:none;padding-bottom:0;">{mode_note}, '
                 f'across {n_events} events.</p>{id_note}{"".join(cards)}')
+
+    # --- Team-level check: pooled across every uploaded event, catches the case
+    # where individual dancers don't repeat (different divisions, no shared people)
+    # but the same judge sees the same SCHOOL's dancers across several divisions ---
+    team_results, n_team_tested = team_watch(events)
+    team_flagged = [r for r in team_results if r.get("flagged")]
+    team_mode_note = f"Checked all {n_team_tested} school/judge pairs with at least 5 scored competitors"
+
+    if n_team_tested == 0:
+        team_body = ""  # no team data available (e.g. CSVs without a team column) -- section omitted
+    elif not team_flagged:
+        team_body = (f'<div class="clear-banner">No consistent pattern found.'
+                f'<span>{team_mode_note}, across {n_events} events.</span></div>')
+    else:
+        cards = []
+        for r in team_flagged:
+            word = "Favored" if r["direction"] == "favored" else "Punished"
+            verb = ("scored this school's competitors higher" if r["direction"] == "favored"
+                    else "scored this school's competitors lower")
+            cards.append(
+                f'<div class="watch-card {r["direction"]}"><div class="watch-card-top"><div>'
+                f'<div class="watch-who">{r["team"]} &middot; {r["judge"]}</div>'
+                f'<div class="watch-meta">{r["n_competitors"]} competitors across {r["n_events"]} events</div></div>'
+                f'<div class="pill {"favored-flag" if r["direction"]=="favored" else "punished-flag"}">{word}</div></div>'
+                f'<p class="watch-detail">Across every competitor from this school that <b>{r["judge"]}</b> scored, '
+                f'they consistently {verb} than the rest of the panel did. '
+                f'Estimated chance this is a false alarm: <b>{r["q"]*100:.1f}%</b>.</p></div>')
+        team_body = (f'<p class="subtitle" style="border-bottom:none;padding-bottom:0;">{team_mode_note}, '
+                f'across {n_events} events.</p>{"".join(cards)}')
+
+    team_section = ""
+    if team_body:
+        team_section = f"""
+  <section class="block" style="margin-top:32px;">
+    <h2>School Patterns Across Events</h2>
+    {team_body}
+  </section>"""
 
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{title}</title><style>{REPORT_CSS}</style></head>
 <body><div class="sheet">
 <p class="eyebrow">Multi-Event Pattern Check</p><h1>{title}</h1>
-{body}
+<section class="block">
+  <h2>Competitor Patterns Across Events</h2>
+  {competitor_body}
+</section>
+{team_section}
 <footer>{DISCLAIMER} This tracks the same person across separate competitions by name where possible
-(competition numbers are reassigned each event, so they aren't used as the primary match). Results are
-corrected for the number of pairs checked, so a flag here is meaningfully rarer than a single-event flag.</footer>
+(competition numbers are reassigned each event, so they aren't used as the primary match). The school check
+pools every competitor from that school a judge scored across all uploaded events, which works even when the
+events are different divisions of one competition with no individual dancers in common. Results are corrected
+for the number of pairs checked, so a flag here is meaningfully rarer than a single-event flag.</footer>
 </div></body></html>"""
 
 

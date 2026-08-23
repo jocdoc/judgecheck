@@ -93,3 +93,23 @@ all. Bring that back to Claude as its own project when usage justifies it.
 - The mitigations discussed earlier for circumvention (audit logging + report
   IDs, the judge-pair collusion check) aren't built yet — worth prioritizing
   before this handles reports people might rely on for real decisions.
+
+## Multi-event watch list now has two independent checks
+
+Uploading several PDFs together runs two separate analyses, since they answer
+different questions and one can find something when the other has nothing to
+test:
+
+- **Competitor Patterns** — the same named dancer, scored unusually by the
+  same judge, across separate events. Needs that dancer to actually reappear,
+  so it correctly shows zero results when the uploaded files are different
+  age/skill divisions of one event (a U16 dancer and a U17 dancer are
+  different people).
+- **School Patterns** — pools every competitor from a given school that a
+  given judge scored, across every uploaded event. This is the one that
+  actually works for "several divisions from one competition," since a
+  school typically has dancers in more than one division and the same judge
+  often judges more than one division. Validated against a realistic
+  synthetic multi-division scenario (well-calibrated false-positive rate,
+  correctly detected an injected bias) and confirmed against two real MAO
+  2019 division files that genuinely share judges.
