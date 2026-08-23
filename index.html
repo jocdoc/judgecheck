@@ -127,7 +127,7 @@ table.preview-table tr:nth-child(even) td{background:#FAFAF8}
 
   <div class="upload-card" id="uploadCard">
     <h2>Run a review</h2>
-    <p class="upload-sub">Files are analyzed in memory and never stored.</p>
+    <p class="upload-sub">Files are analyzed in memory and never stored — unless you choose to save results to the permanent archive below.</p>
 
     <div class="dropzone" id="dropzone">
       <p>Drag one or more score sheets here, or click to choose</p>
@@ -147,6 +147,23 @@ table.preview-table tr:nth-child(even) td{background:#FAFAF8}
     <div class="error" id="errorBox"></div>
   </div>
 
+  <div class="upload-card" id="archiveSearchCard">
+    <h2>Search the archive</h2>
+    <p class="upload-sub">Look up everything on record for a specific judge, school, or competitor, pooled across every competition that's been saved to the archive.</p>
+    <div class="actions" style="margin-top:0;flex-wrap:wrap;">
+      <select id="archiveSearchKind" class="btn-ghost" style="padding:12px 14px;border-radius:8px;border:1px solid var(--line);font-family:'Instrument Sans',sans-serif;font-size:14.5px;background:#fff;">
+        <option value="query_judge">Judge</option>
+        <option value="query_team">School</option>
+        <option value="query_competitor">Competitor</option>
+      </select>
+      <input type="text" id="archiveSearchName" placeholder="Exact name as it appears on results sheets"
+        style="flex:1;min-width:200px;padding:12px 14px;border-radius:8px;border:1px solid var(--line);font-family:'Instrument Sans',sans-serif;font-size:14.5px;">
+      <button class="btn btn-primary" id="archiveSearchBtn">Search</button>
+      <span class="spinner" id="archiveSpinner">searching archive&hellip;</span>
+    </div>
+    <div class="error" id="archiveErrorBox"></div>
+  </div>
+
   <div id="previewArea"></div>
 
   <div id="reportArea">
@@ -164,8 +181,10 @@ table.preview-table tr:nth-child(even) td{background:#FAFAF8}
     JudgeCheck is a statistical screening tool, not proof of misconduct. It measures how unusual
     a scoring pattern is compared to chance; it cannot know why a pattern exists. Results should
     prompt review by the appropriate governing body — never punishment on their own. Uploaded
-    files are processed in memory and are not stored. PDF extraction can make mistakes — always
-    check the preview table against your source document before running the analysis.
+    files are processed in memory and are not stored, unless you explicitly choose "Save to archive"
+    after reviewing the extracted data — that's the only action that saves anything permanently.
+    PDF extraction can make mistakes — always check the preview table against your source document
+    before running the analysis or saving it.
   </div>
 </footer>
 
@@ -278,6 +297,7 @@ analyzeBtn.addEventListener('click', async () => {
       currentPreview = data;
       renderPreview(data);
       document.getElementById('uploadCard').style.display = 'none';
+      document.getElementById('archiveSearchCard').style.display = 'none';
       document.getElementById('previewArea').style.display = 'block';
       document.getElementById('previewArea').scrollIntoView({behavior:'smooth'});
     } else {
@@ -297,6 +317,8 @@ function showReport(data){
   frame.srcdoc = data.html;
   document.getElementById('reportArea').style.display = 'block';
   document.getElementById('previewArea').style.display = 'none';
+  document.getElementById('uploadCard').style.display = 'none';
+  document.getElementById('archiveSearchCard').style.display = 'none';
   frame.onload = () => { try { frame.style.height = (frame.contentDocument.body.scrollHeight + 40) + 'px'; } catch(e){} };
   document.getElementById('reportArea').scrollIntoView({behavior:'smooth'});
 }
@@ -349,13 +371,80 @@ function renderPreview(data){
 
   html += '<div class="preview-actions">'
     + '<button class="btn btn-primary" id="confirmBtn">Looks good — run analysis</button>'
+    + '<button class="btn btn-ghost" id="saveArchiveBtn">Save to archive</button>'
     + '<button class="btn btn-ghost" id="cancelPreviewBtn">Start over</button>'
     + '<span class="spinner" id="confirmSpinner">'+(isWatch ? 'checking every competitor/judge pair\u2026' : 'running 1,000 reshuffles\u2026')+'</span>'
-    + '</div><div class="error" id="previewError"></div>';
+    + '<span class="spinner" id="archiveSaveSpinner">saving\u2026</span>'
+    + '</div><div class="error" id="previewError"></div>'
+    + '<div id="archiveSaveResult" class="mode-note" style="display:none;"></div>';
 
   area.innerHTML = html;
   document.getElementById('confirmBtn').addEventListener('click', submitConfirmedRounds);
+  document.getElementById('saveArchiveBtn').addEventListener('click', saveToArchive);
   document.getElementById('cancelPreviewBtn').addEventListener('click', resetAll);
+}
+
+function gatherEditedRounds(){
+  return currentPreview.rounds.map((round, ri) => {
+    const inputs = document.querySelectorAll('input[data-round="'+ri+'"]');
+    const byRow = {};
+    inputs.forEach(inp => {
+      const rowi = inp.getAttribute('data-row');
+      const judge = inp.getAttribute('data-judge');
+      byRow[rowi] = byRow[rowi] || {};
+      byRow[rowi][judge] = inp.value === '' ? null : parseFloat(inp.value);
+    });
+    return {
+      label: round.label,
+      judges: round.judges,
+      rows: round.rows.map((row, rowi) => ({
+        competitor_id: row.competitor_id,
+        name: row.name,
+        team: row.team,
+        marks: byRow[rowi] || row.marks
+      }))
+    };
+  });
+}
+
+async function saveToArchive(){
+  const errBox = document.getElementById('previewError');
+  errBox.style.display = 'none';
+  const resultBox = document.getElementById('archiveSaveResult');
+  resultBox.style.display = 'none';
+  const btn = document.getElementById('saveArchiveBtn');
+  const spin = document.getElementById('archiveSaveSpinner');
+  btn.disabled = true;
+  spin.classList.add('on');
+
+  try {
+    const rounds = gatherEditedRounds();
+    const res = await fetch('/api/analyze', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        action: 'ingest',
+        confirmed_rounds: rounds,
+        title: currentPreview.title,
+        format: currentPreview.format,
+        warnings: currentPreview.warnings || []
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Saving to the archive failed.');
+    const lines = data.saved.map(s =>
+      s.status === 'duplicate'
+        ? '&#9888; "'+s.source+'" was already in the archive (skipped).'
+        : '&#10003; "'+s.source+'" saved to the archive.'
+    );
+    resultBox.innerHTML = lines.join('<br>');
+    resultBox.style.display = 'block';
+  } catch (err) {
+    errBox.textContent = err.message;
+    errBox.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    spin.classList.remove('on');
+  }
 }
 
 window.markEdited = function(input){ input.classList.add('edited'); };
@@ -372,26 +461,7 @@ async function submitConfirmedRounds(){
   spin.classList.add('on');
 
   try {
-    const rounds = currentPreview.rounds.map((round, ri) => {
-      const inputs = document.querySelectorAll('input[data-round="'+ri+'"]');
-      const byRow = {};
-      inputs.forEach(inp => {
-        const rowi = inp.getAttribute('data-row');
-        const judge = inp.getAttribute('data-judge');
-        byRow[rowi] = byRow[rowi] || {};
-        byRow[rowi][judge] = inp.value === '' ? null : parseFloat(inp.value);
-      });
-      return {
-        label: round.label,
-        judges: round.judges,
-        rows: round.rows.map((row, rowi) => ({
-          competitor_id: row.competitor_id,
-          name: row.name,
-          team: row.team,
-          marks: byRow[rowi] || row.marks
-        }))
-      };
-    });
+    const rounds = gatherEditedRounds();
 
     const res = await fetch('/api/analyze', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -425,9 +495,44 @@ function resetAll(){
   document.getElementById('previewArea').style.display = 'none';
   document.getElementById('previewArea').innerHTML = '';
   document.getElementById('uploadCard').style.display = 'block';
+  document.getElementById('archiveSearchCard').style.display = 'block';
   window.scrollTo({top:0, behavior:'smooth'});
 }
 document.getElementById('resetBtn').addEventListener('click', resetAll);
+
+// ---------- Archive search ----------
+async function runArchiveSearch(){
+  const errBox = document.getElementById('archiveErrorBox');
+  errBox.style.display = 'none';
+  const kind = document.getElementById('archiveSearchKind').value;
+  const name = document.getElementById('archiveSearchName').value.trim();
+  if (!name) { errBox.textContent = 'Enter a name to search for.'; errBox.style.display = 'block'; return; }
+
+  const btn = document.getElementById('archiveSearchBtn');
+  const spin = document.getElementById('archiveSpinner');
+  btn.disabled = true;
+  spin.classList.add('on');
+
+  try {
+    const res = await fetch('/api/analyze', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ action: kind, name })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Search failed.');
+    showReport(data);
+  } catch (err) {
+    errBox.textContent = err.message;
+    errBox.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    spin.classList.remove('on');
+  }
+}
+document.getElementById('archiveSearchBtn').addEventListener('click', runArchiveSearch);
+document.getElementById('archiveSearchName').addEventListener('keydown', e => {
+  if (e.key === 'Enter') runArchiveSearch();
+});
 </script>
 </body>
 </html>

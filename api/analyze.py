@@ -205,7 +205,7 @@ def team_watch(events, min_observations=5, q_threshold=0.10):
         gaps = grp["gap"].values
         _, p = sstats.ttest_1samp(gaps, popmean=0.0)
         results.append({"team": team, "judge": judge, "n_competitors": len(grp),
-                        "n_events": grp["event"].nunique(), "avg_gap": float(gaps.mean()),
+                        "n_rounds": grp["event"].nunique(), "avg_gap": float(gaps.mean()),
                         "direction": "favored" if gaps.mean() > 0 else "punished", "p": float(p)})
     if not results:
         return [], 0
@@ -437,11 +437,25 @@ def render_single_event_report(rounds, event_name, extra_warnings=None):
 </div></body></html>"""
 
 
+def _count_distinct_events(rounds):
+    """Rounds are labeled '{source file/competition} \u2014 {round label}' when
+    they come from a multi-file batch (or just the plain label for a
+    single-file upload). Counts distinct COMPETITIONS, not distinct
+    judging panels/rounds -- those are different numbers and the report
+    text needs to say the right one."""
+    sources = set()
+    for label, _, _ in rounds:
+        source = label.split(" \u2014 ", 1)[0] if " \u2014 " in label else label
+        sources.add(source)
+    return len(sources)
+
+
 def render_watch_report(events, title):
     results, n_tested, match_counts = competitor_watch(events)
-    n_events = len(events)
+    n_events = _count_distinct_events(events)
+    n_rounds = len(events)
     flagged = [r for r in results if r.get("flagged")]
-    mode_note = f"Checked all {n_tested} competitor/judge pairs with at least 3 shared events"
+    mode_note = f"Checked all {n_tested} competitor/judge pairs with at least 3 shared rounds"
 
     id_note = ""
     n_id_fallback = match_counts.get("competitor_id", 0)
@@ -468,9 +482,9 @@ def render_watch_report(events, title):
             cards.append(
                 f'<div class="watch-card {r["direction"]}"><div class="watch-card-top"><div>'
                 f'<div class="watch-who">{r["display"]} &middot; {r["judge"]}</div>'
-                f'<div class="watch-meta">{("Team " + r["team"] + " &middot; ") if r["team"] else ""}{r["events"]} shared events</div></div>'
+                f'<div class="watch-meta">{("Team " + r["team"] + " &middot; ") if r["team"] else ""}{r["events"]} shared rounds</div></div>'
                 f'<div class="pill {"favored-flag" if r["direction"]=="favored" else "punished-flag"}">{word}</div></div>'
-                f'<p class="watch-detail">Across their shared events, <b>{r["judge"]}</b> consistently {verb} '
+                f'<p class="watch-detail">Across their shared rounds, <b>{r["judge"]}</b> consistently {verb} '
                 f'than the rest of the panel did. Estimated chance this is a false alarm: <b>{r["q"]*100:.1f}%</b>.'
                 f'{method_note}</p></div>')
         competitor_body = (f'<p class="subtitle" style="border-bottom:none;padding-bottom:0;">{mode_note}, '
@@ -497,7 +511,7 @@ def render_watch_report(events, title):
             cards.append(
                 f'<div class="watch-card {r["direction"]}"><div class="watch-card-top"><div>'
                 f'<div class="watch-who">{r["team"]} &middot; {r["judge"]}</div>'
-                f'<div class="watch-meta">{r["n_competitors"]} competitors across {r["n_events"]} events</div></div>'
+                f'<div class="watch-meta">{r["n_competitors"]} competitors across {r["n_rounds"]} rounds</div></div>'
                 f'<div class="pill {"favored-flag" if r["direction"]=="favored" else "punished-flag"}">{word}</div></div>'
                 f'<p class="watch-detail">Across every competitor from this school that <b>{r["judge"]}</b> scored, '
                 f'they consistently {verb} than the rest of the panel did. '
@@ -591,7 +605,171 @@ def _preview_json_to_rounds(confirmed_rounds):
     return rounds
 
 
+def _group_rounds_by_source(rounds):
+    """Splits a confirmed_rounds list back into per-source-file groups for
+    ingestion -- one database 'event' per uploaded PDF, not per round. Relies
+    on the labeling convention used everywhere else in this file: a
+    multi-file batch labels each round '{source filename} \u2014 {round label}',
+    so the prefix before the dash identifies which file it came from. A
+    single-PDF (non-batch) preview's rounds have no such prefix; those are
+    treated as one group under the whole title."""
+    groups = {}
+    for label, df, judge_cols in rounds:
+        if " \u2014 " in label:
+            source, round_part = label.split(" \u2014 ", 1)
+        else:
+            source, round_part = label, label
+        groups.setdefault(source, []).append((round_part, df, judge_cols))
+    return groups
+
+
+def _content_hash_for_rounds(rounds):
+    """A stable fingerprint of one event's confirmed data, used to prevent
+    ingesting the same competition twice. Hashing the actual score data
+    (not the original PDF bytes, which aren't available at this stage --
+    only the reviewed/possibly-edited rounds are) also has a nice side
+    effect: two different PDF exports of the identical result set still
+    hash the same, so a re-export under a different filename is still
+    caught as a duplicate."""
+    import hashlib
+    parts = []
+    for label, df, judge_cols in sorted(rounds, key=lambda r: r[0]):
+        parts.append(label)
+        for j in judge_cols:
+            parts.append(j)
+        for _, row in df.sort_values("competitor_id").iterrows():
+            parts.append(str(row["competitor_id"]))
+            for j in judge_cols:
+                parts.append(f"{row[j]:.3f}")
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def render_history_report(rounds, subject_kind, subject_name):
+    """Renders a profile-style report for 'everything the archive knows
+    about this judge/team/competitor' -- runs the same competitor_watch and
+    team_watch used for session-based multi-event uploads, on whatever
+    history the database query returned, then filters the results down to
+    the one subject that was actually searched for (a judge query still
+    pulls in the other judges who share those rounds, since that's needed
+    to compute the panel comparison -- but only the target judge's own
+    results are shown)."""
+    n_events = _count_distinct_events(rounds)
+    n_rounds = len(rounds)
+
+    team_results, n_team_tested = team_watch(rounds)
+    if subject_kind == "team":
+        team_results = [r for r in team_results if r["team"] == subject_name]
+    elif subject_kind == "judge":
+        team_results = [r for r in team_results if r["judge"] == subject_name]
+    else:
+        team_results = []  # a single competitor's own team pattern isn't the question being asked here
+    team_flagged = [r for r in team_results if r.get("flagged")]
+
+    comp_results, n_comp_tested, match_counts = competitor_watch(rounds)
+    if subject_kind == "judge":
+        comp_results = [r for r in comp_results if r["judge"] == subject_name]
+    elif subject_kind == "competitor":
+        comp_results = [r for r in comp_results if r["display"] == subject_name]
+    else:
+        comp_results = []
+    comp_flagged = [r for r in comp_results if r.get("flagged")]
+
+    subject_label = {"judge": "Judge", "team": "School", "competitor": "Competitor"}[subject_kind]
+    cards = []
+    for r in comp_flagged:
+        word = "Favored" if r["direction"] == "favored" else "Punished"
+        verb = "scored higher" if r["direction"] == "favored" else "scored lower"
+        cards.append(
+            f'<div class="watch-card {r["direction"]}"><div class="watch-card-top"><div>'
+            f'<div class="watch-who">{r["display"]} &middot; {r["judge"]}</div>'
+            f'<div class="watch-meta">{r["events"]} shared rounds</div></div>'
+            f'<div class="pill {"favored-flag" if r["direction"]=="favored" else "punished-flag"}">{word}</div></div>'
+            f'<p class="watch-detail">Consistently {verb} than the rest of the panel. '
+            f'Estimated chance this is a false alarm: <b>{r["q"]*100:.1f}%</b>.</p></div>')
+    for r in team_flagged:
+        word = "Favored" if r["direction"] == "favored" else "Punished"
+        verb = "scored higher" if r["direction"] == "favored" else "scored lower"
+        cards.append(
+            f'<div class="watch-card {r["direction"]}"><div class="watch-card-top"><div>'
+            f'<div class="watch-who">{r["team"]} &middot; {r["judge"]}</div>'
+            f'<div class="watch-meta">{r["n_competitors"]} competitors across {r["n_rounds"]} rounds</div></div>'
+            f'<div class="pill {"favored-flag" if r["direction"]=="favored" else "punished-flag"}">{word}</div></div>'
+            f'<p class="watch-detail">Consistently {verb} than the rest of the panel for this school\'s competitors. '
+            f'Estimated chance this is a false alarm: <b>{r["q"]*100:.1f}%</b>.</p></div>')
+
+    if not cards:
+        body = (f'<div class="clear-banner">No consistent pattern found.'
+               f'<span>Checked {n_rounds} judging panels across {n_events} events in the archive '
+               f'involving this {subject_kind}.</span></div>')
+    else:
+        body = (f'<p class="subtitle" style="border-bottom:none;padding-bottom:0;">Checked {n_rounds} judging '
+               f'panels across {n_events} events in the archive.</p>{"".join(cards)}')
+
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{subject_label}: {subject_name}</title><style>{REPORT_CSS}</style></head>
+<body><div class="sheet">
+<p class="eyebrow">Archive History Lookup</p><h1>{subject_name}</h1>
+<p class="subtitle">{subject_label} &middot; {n_events} events on record</p>
+{body}
+<footer>{DISCLAIMER} This draws on every event in the archive involving this {subject_kind}, not just
+one session's uploads, which is why it can have more statistical power than a one-off check.</footer>
+</div></body></html>"""
+
+
 def analyze_payload(payload):
+    action = payload.get("action")
+
+    # --- Database actions: ingesting into or querying the permanent archive.
+    # Imported lazily so the existing session-based analysis (everything
+    # above) keeps working even before a database is provisioned. ---
+    if action in ("ingest", "check_duplicate", "query_judge", "query_team",
+                 "query_competitor", "list_events", "search_names"):
+        from . import db
+
+        if action == "check_duplicate":
+            existing = db.already_ingested(payload["content_hash"])
+            return {"duplicate": existing is not None, "existing": existing}
+
+        if action == "ingest":
+            rounds = _preview_json_to_rounds(payload["confirmed_rounds"])
+            groups = _group_rounds_by_source(rounds)
+            saved = []
+            for source_name, group_rounds in groups.items():
+                content_hash = _content_hash_for_rounds(group_rounds)
+                existing = db.already_ingested(content_hash)
+                if existing:
+                    saved.append({"source": source_name, "status": "duplicate", "event_id": existing["id"]})
+                    continue
+                event_id = db.ingest_confirmed_rounds(
+                    group_rounds, source_name, payload.get("title", source_name),
+                    payload.get("format", "unknown"), payload.get("warnings", []), content_hash,
+                )
+                saved.append({"source": source_name, "status": "saved", "event_id": event_id})
+            return {"saved": saved}
+
+        if action == "list_events":
+            return {"events": db.list_events()}
+
+        if action == "search_names":
+            return {"matches": db.search_names(payload.get("prefix", ""), payload.get("kind", "competitor_name"))}
+
+        # query_judge / query_team / query_competitor
+        kind_map = {
+            "query_judge": ("judge", db.fetch_rounds_for_judge),
+            "query_team": ("team", db.fetch_rounds_for_team),
+            "query_competitor": ("competitor", db.fetch_rounds_for_competitor),
+        }
+        subject_kind, fetch_fn = kind_map[action]
+        subject_name = payload.get("name", "").strip()
+        if not subject_name:
+            raise UserError("Please provide a name to search for.")
+        rounds = fetch_fn(subject_name)
+        if not rounds:
+            raise UserError(f'No history found for "{subject_name}". Check the spelling, or it may not be in the archive yet.')
+        html = render_history_report(rounds, subject_kind, subject_name)
+        return {"html": html, "mode": "history_query"}
+
     # --- Path 3: confirmed data from the PDF preview step ---
     if "confirmed_rounds" in payload:
         rounds = _preview_json_to_rounds(payload["confirmed_rounds"])

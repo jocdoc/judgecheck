@@ -8,6 +8,7 @@ dependencies = [
     "scipy",
     "openpyxl",
     "pdfplumber",
+    "psycopg2-binary",
 ]
 
 [tool.vercel]
