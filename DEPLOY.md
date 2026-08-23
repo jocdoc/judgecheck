@@ -14,7 +14,8 @@ optional database and use "Save to archive" — see that section below.
 | `api/analyze.py` | The statistics engine + request routing (CSV/XLSX, PDF preview, confirmed analysis) |
 | `api/pdf_parsers.py` | Detects which PDF format was uploaded and routes to the right parser |
 | `api/quickfeis_parser.py` | Parser for QuickFeis-format results PDFs |
-| `api/feisresults_parser.py` | Parser for feisresults.com-format results PDFs |
+| `api/feisresults_parser.py` | Parser for the original feisresults.com layout (multi-competition file, RECALL/FINAL MARKS tables) |
+| `api/maro_parser.py` | Parser for the "Mid Atlantic Region Oireachtas" feisresults.com layout (one competition per file, rotated vertical judge headers) |
 | `api/db.py` | Optional historical archive: database connection, ingestion, and query functions (see "The historical archive" section) |
 | `api/schema.sql` | Database schema for the archive feature |
 | `requirements.txt` | Tells Vercel which Python libraries to install (`pdfplumber`, `psycopg2-binary`) |
@@ -22,9 +23,22 @@ optional database and use "Save to archive" — see that section below.
 
 ## PDF support
 
-Two formats are supported today, both tested against real competition PDFs with
-zero extraction errors on independent verification: **QuickFeis** and
-**feisresults.com**. A PDF upload never analyzes immediately — it always shows an
+Three formats are supported today, all tested against real competition PDFs with
+zero extraction errors on independent verification: **QuickFeis**, the original
+**feisresults.com** layout, and a third layout used by "Mid Atlantic Region
+Oireachtas" — also feisresults.com-branded, but structurally unrelated to the
+other one (one PDF per competition rather than one per whole event, and judge
+names printed as rotated vertical column headers that need coordinate-and-
+rotation-aware extraction, not plain text reading). Worth knowing: "feisresults.com"
+branding alone doesn't mean a PDF matches either feisresults.com parser — the
+platform apparently supports more than one export template, and format detection
+had to be built around a more specific text signal than the copyright footer.
+This format also uses a "drop the high and low score, sum the middle three" IP
+system (confirmed against real totals before trusting the extraction), though only
+the raw Score half of each judge's mark is used for analysis, consistent with every
+other parser here.
+
+A PDF upload never analyzes immediately — it always shows an
 editable preview table first, with any extraction warnings called out (e.g. "this
 competitor didn't dance this round"), so a human confirms the numbers before the
 statistics run. Uploading a PDF in an unrecognized format returns a clear message
