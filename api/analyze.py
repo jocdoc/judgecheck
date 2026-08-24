@@ -20,6 +20,7 @@ import base64
 import os
 import io
 import json
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 
 import numpy as np
@@ -1067,6 +1068,55 @@ pattern above -- it isn't a separate statistical test.</footer>
 </div></body></html>"""
 
 
+def _parse_iso(iso_string):
+    """Parses the ISO-format timestamp string that db.get_worst_judges_cache()
+    produces (via datetime.isoformat()) back into a comparable datetime --
+    needed to check it against db.latest_import_timestamp()'s raw datetime
+    without adding a second db function just for an internal comparison."""
+    return datetime.fromisoformat(iso_string)
+
+
+def _compute_worst_judges_tally(rounds):
+    """Archive-wide aggregation over already-validated competitor_watch/
+    team_watch results -- pure counting, not a new statistical test, so no
+    new Monte Carlo validation is needed here (see prior sessions for why
+    that distinction matters). Returns the same {by_count, by_q,
+    n_judges_with_flags} shape whether called live or from the cache
+    refresh path below."""
+    if not rounds:
+        return {"by_count": [], "by_q": [], "n_judges_with_flags": 0}
+
+    comp_results, _, _ = competitor_watch(rounds)
+    team_results, _ = team_watch(rounds)
+    comp_flagged = [r for r in comp_results if r.get("flagged")]
+    team_flagged = [r for r in team_results if r.get("flagged")]
+
+    per_judge = {}
+    for r in comp_flagged:
+        per_judge.setdefault(r["judge"], []).append(
+            {"kind": "competitor", "subject": r["display"], "q": r["q"], "direction": r["direction"]})
+    for r in team_flagged:
+        per_judge.setdefault(r["judge"], []).append(
+            {"kind": "school", "subject": r["team"], "q": r["q"], "direction": r["direction"]})
+
+    by_count = sorted(
+        [{"judge": j,
+          "count": len(items),
+          "n_schools": sum(1 for it in items if it["kind"] == "school"),
+          "n_competitors": sum(1 for it in items if it["kind"] == "competitor")}
+         for j, items in per_judge.items()],
+        key=lambda x: -x["count"])[:5]
+
+    by_q_rows = []
+    for j, items in per_judge.items():
+        best = min(items, key=lambda it: it["q"])
+        by_q_rows.append({"judge": j, "q": best["q"], "subject": best["subject"],
+                          "kind": best["kind"], "direction": best["direction"]})
+    by_q = sorted(by_q_rows, key=lambda x: x["q"])[:5]
+
+    return {"by_count": by_count, "by_q": by_q, "n_judges_with_flags": len(per_judge)}
+
+
 def analyze_payload(payload):
     action = payload.get("action")
 
@@ -1074,7 +1124,8 @@ def analyze_payload(payload):
     # Imported lazily so the existing session-based analysis (everything
     # above) keeps working even before a database is provisioned. ---
     if action in ("ingest", "bulk_ingest", "check_duplicate", "query_judge", "query_team",
-                 "query_competitor", "list_events", "search_names"):
+                 "query_competitor", "list_events", "search_names", "worst_judges_tally",
+                 "recompute_worst_judges_tally"):
         from . import db
 
         if action == "check_duplicate":
@@ -1096,6 +1147,11 @@ def analyze_payload(payload):
                     payload.get("format", "unknown"), payload.get("warnings", []), content_hash,
                 )
                 saved.append({"source": source_name, "status": "saved", "event_id": event_id})
+            # Note: the worst-judges tally is NOT refreshed automatically here.
+            # Per explicit decision, it only updates via the "Recompute now"
+            # button, and only does real work then if new data has landed
+            # since the last recompute -- see the recompute_worst_judges_tally
+            # action below.
             return {"saved": saved}
 
         if action == "bulk_ingest":
@@ -1163,6 +1219,47 @@ def analyze_payload(payload):
 
         if action == "search_names":
             return {"matches": db.search_names(payload.get("prefix", ""), payload.get("kind", "competitor_name"))}
+
+        if action == "worst_judges_tally":
+            # Reads the cache only -- never computed here. Per explicit
+            # decision, this only updates via the "Recompute now" button
+            # (recompute_worst_judges_tally below), never automatically on
+            # import and never on a plain page load. cached is None only
+            # before the very first recompute has ever been run.
+            cached = db.get_worst_judges_cache()
+            if cached is None:
+                return {"by_count": [], "by_q": [], "n_judges_with_flags": 0, "computed_at": None}
+            return cached
+
+        if action == "recompute_worst_judges_tally":
+            # Button-triggered only. Does real work ONLY if new data has
+            # landed since the last recompute -- compares the most recent
+            # event's ingested_at against the cache's own computed_at,
+            # rather than recomputing unconditionally every time someone
+            # clicks the button (which would defeat the point of caching
+            # at all -- most clicks will happen with no new data since the
+            # last one).
+            cached = db.get_worst_judges_cache()
+            latest_import = db.latest_import_timestamp()
+
+            if latest_import is None:
+                # Archive is completely empty -- nothing to compute, but not
+                # an error; distinguishable from "cache never computed" via
+                # up_to_date=True so the frontend doesn't imply stale data.
+                return {"by_count": [], "by_q": [], "n_judges_with_flags": 0,
+                       "computed_at": None, "recomputed": False, "up_to_date": True}
+
+            if cached is not None and latest_import <= _parse_iso(cached["computed_at"]):
+                # Nothing new since last recompute -- return the existing
+                # cache unchanged rather than re-scanning the whole archive
+                # for no reason.
+                return {**cached, "recomputed": False, "up_to_date": True}
+
+            rounds = db.fetch_all_rounds()
+            fresh = _compute_worst_judges_tally(rounds)
+            db.set_worst_judges_cache(fresh)
+            stored = db.get_worst_judges_cache()  # re-read to pick up the real computed_at from the DB
+            return {**stored, "recomputed": True, "up_to_date": True}
 
         # query_judge / query_team / query_competitor
         kind_map = {
