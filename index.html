@@ -38,6 +38,22 @@ h1 em{font-style:italic;font-weight:500;color:var(--clear)}
 .upload-card{background:var(--paper-raised);border:1px solid var(--line);border-radius:12px;padding:26px;margin-bottom:18px}
 .upload-card h2{font-family:'Fraunces',serif;font-weight:600;font-size:20px;margin:0 0 4px}
 .upload-sub{font-size:13.5px;color:var(--ink-soft);margin:0 0 18px}
+
+.card-header-row{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:4px}
+.card-header-row .card-header-main{flex:1;min-width:220px}
+.wj-box{flex:0 0 auto;width:240px;background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.wj-box-title{font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--brass);margin:0 0 8px;display:flex;justify-content:space-between;align-items:center}
+.wj-toggle{background:none;border:none;color:var(--ink-soft);font-family:'Instrument Sans',sans-serif;font-size:11px;cursor:pointer;text-decoration:underline;padding:0}
+.wj-row{display:flex;align-items:baseline;gap:8px;font-size:12.5px;padding:4px 0;border-bottom:1px solid var(--line)}
+.wj-row:last-child{border-bottom:none}
+.wj-rank{font-family:'IBM Plex Mono',monospace;color:var(--ink-soft);width:14px;flex:0 0 auto}
+.wj-name{flex:1;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wj-metric{font-family:'IBM Plex Mono',monospace;color:var(--flag);flex:0 0 auto;font-size:11.5px}
+.wj-empty,.wj-loading{font-size:12px;color:var(--ink-soft)}
+.wj-note{font-size:10.5px;color:var(--ink-soft);margin-top:8px;line-height:1.4}
+.wj-footer{display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:8px;border-top:1px solid var(--line)}
+.wj-footer .wj-toggle:disabled{color:var(--line);cursor:default;text-decoration:none}
+.wj-status{font-size:10.5px;color:var(--ink-soft)}
 .dropzone{border:2px dashed var(--line);border-radius:10px;padding:34px 20px;text-align:center;cursor:pointer;transition:border-color .15s,background .15s}
 .dropzone:hover,.dropzone.dragover{border-color:var(--brass);background:#FBFBF8}
 .dropzone p{margin:0;font-size:14.5px}
@@ -155,8 +171,22 @@ table.preview-table tr:nth-child(even) td{background:#FAFAF8}
   </div>
 
   <div class="upload-card" id="archiveSearchCard">
-    <h2>Search the archive</h2>
-    <p class="upload-sub">Look up everything on record for a specific judge, school, or competitor, pooled across every competition that's been saved to the archive.</p>
+    <div class="card-header-row">
+      <div class="card-header-main">
+        <h2>Search the archive</h2>
+        <p class="upload-sub">Look up everything on record for a specific judge, school, or competitor, pooled across every competition that's been saved to the archive.</p>
+      </div>
+      <div class="wj-box" id="wjBox">
+        <p class="wj-box-title"><span id="wjBoxTitle">Most flagged judges</span>
+          <button class="wj-toggle" id="wjToggleBtn">by severity</button></p>
+        <div id="wjBoxBody"><p class="wj-loading">loading&hellip;</p></div>
+        <div class="wj-footer">
+          <button class="wj-toggle" id="wjRecomputeBtn">Recompute now</button>
+          <span id="wjStatusText" class="wj-status"></span>
+        </div>
+        <p class="wj-note">Statistical screening only, not proof of misconduct.</p>
+      </div>
+    </div>
     <div class="actions" style="margin-top:0;flex-wrap:wrap;">
       <select id="archiveSearchKind" class="btn-ghost" style="padding:12px 14px;border-radius:8px;border:1px solid var(--line);font-family:'Instrument Sans',sans-serif;font-size:14.5px;background:#fff;">
         <option value="query_judge">Judge</option>
@@ -605,6 +635,112 @@ document.getElementById('archiveSearchBtn').addEventListener('click', runArchive
 document.getElementById('archiveSearchName').addEventListener('keydown', e => {
   if (e.key === 'Enter') runArchiveSearch();
 });
+
+// ---------- Worst-judges tally box ----------
+// Read-only on page load: just displays whatever is currently cached.
+// Recomputing only happens when someone clicks "Recompute now" -- see
+// runWjRecompute() below -- and per the backend's own freshness check,
+// even that click only does real work if new data has landed since the
+// last recompute. Clicking a judge's name in either list runs the same
+// archive search used elsewhere on this page, matching the existing
+// "did you mean" suggestion-chip UX.
+let wjData = null;
+let wjView = 'count'; // 'count' or 'q'
+
+function formatWjTimestamp(iso){
+  if (!iso) return 'never';
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+}
+
+function renderWjBox(){
+  const body = document.getElementById('wjBoxBody');
+  const title = document.getElementById('wjBoxTitle');
+  const toggle = document.getElementById('wjToggleBtn');
+  if (!wjData) return;
+
+  const rows = wjView === 'count' ? wjData.by_count : wjData.by_q;
+  title.textContent = wjView === 'count' ? 'Most flagged judges' : 'Most severe flags';
+  toggle.textContent = wjView === 'count' ? 'by severity' : 'by count';
+
+  if (!rows || rows.length === 0) {
+    body.innerHTML = '<p class="wj-empty">No flagged patterns yet.</p>';
+  } else {
+    body.innerHTML = rows.map((r, i) => {
+      const metric = wjView === 'count'
+        ? `${r.count}&times;`
+        : `${(r.q * 100).toFixed(2)}%`;
+      return `<div class="wj-row"><span class="wj-rank">${i + 1}.</span>` +
+        `<span class="wj-name" title="${r.judge}">${r.judge}</span>` +
+        `<span class="wj-metric">${metric}</span></div>`;
+    }).join('');
+    body.querySelectorAll('.wj-row').forEach((el, i) => {
+      el.style.cursor = 'pointer';
+      el.addEventListener('click', () => {
+        document.getElementById('archiveSearchKind').value = 'query_judge';
+        document.getElementById('archiveSearchName').value = rows[i].judge;
+        runArchiveSearch();
+        document.getElementById('archiveSearchCard').scrollIntoView({behavior:'smooth', block:'start'});
+      });
+    });
+  }
+
+  document.getElementById('wjStatusText').textContent =
+    'Last updated: ' + formatWjTimestamp(wjData.computed_at);
+}
+
+document.getElementById('wjToggleBtn').addEventListener('click', () => {
+  wjView = wjView === 'count' ? 'q' : 'count';
+  renderWjBox();
+});
+
+async function loadWorstJudgesTally(){
+  const body = document.getElementById('wjBoxBody');
+  try {
+    const res = await fetch('/api/analyze', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ action: 'worst_judges_tally' })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not load tally.');
+    wjData = data;
+    renderWjBox();
+  } catch (err) {
+    // Non-fatal -- the rest of the page (upload, search) works fine even if
+    // this box fails (e.g. database not configured yet), so fail quietly
+    // here rather than showing an alarming error box for a small widget.
+    body.innerHTML = '<p class="wj-empty">Unavailable right now.</p>';
+  }
+}
+
+async function runWjRecompute(){
+  const btn = document.getElementById('wjRecomputeBtn');
+  const statusEl = document.getElementById('wjStatusText');
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Checking\u2026';
+  try {
+    const res = await fetch('/api/analyze', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ action: 'recompute_worst_judges_tally' })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Recompute failed.');
+    wjData = data;
+    renderWjBox();
+    statusEl.textContent = data.recomputed
+      ? 'Updated just now'
+      : 'Already up to date (last updated: ' + formatWjTimestamp(data.computed_at) + ')';
+  } catch (err) {
+    statusEl.textContent = 'Recompute failed -- try again later.';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+document.getElementById('wjRecomputeBtn').addEventListener('click', runWjRecompute);
+
+loadWorstJudgesTally();
 
 // ---------- Bulk import ----------
 const BULK_CHUNK_SIZE = 6; // must match MAX_FILES in api/analyze.py -- this is what keeps
