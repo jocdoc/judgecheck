@@ -120,32 +120,67 @@ def _judge_columns_for_page(page):
     """Returns (judge_names_by_round, column_x) where judge_names_by_round
     is [[round1 names...], [round2 names...], [round3 names...]] and
     column_x is a list of (marks_x, place_x) per column position, both
-    length n_judges (panel size, detected dynamically -- not assumed)."""
-    tables = page.find_tables()
-    header = None
-    for t in tables:
-        if len(t.rows) == 3 and t.rows[0].cells and all(t.rows[0].cells):
-            header = t
-            break
-    if header is None:
-        return None, None
-    n_judges = len(header.rows[0].cells)
+    length n_judges (panel size, detected dynamically -- not assumed).
 
-    names_by_round = []
-    for row in header.rows:
-        names = []
-        for cell in row.cells:
-            names.append(page.crop(cell).extract_text().strip() if cell else None)
-        names_by_round.append(names)
-
-    header_bottom = header.bbox[3]
+    POSITION-BASED, NOT TABLE-DETECTION-BASED -- matches the rest of this
+    module (see module docstring for why). This used to rely on
+    page.find_tables() to locate the 3-row judge-name header, which worked
+    on larger files but was found live to misdetect the header as 2 cells
+    instead of 5 on a small (6-competitor) file: pdfplumber's table
+    heuristics are sensitive to how much content surrounds a table, and a
+    short results page apparently changed what it inferred as cell/row
+    boundaries there. Rebuilt to use the same word-coordinate approach
+    already proven reliable for the mark rows themselves: every "Marks"
+    header word (exactly one per judge column, always present) fixes both
+    the column count and x-positions; the three "Round" labels fix the
+    three header-row y-positions; each judge-name word is then assigned to
+    whichever Marks column it sits closest to.
+    """
     words = page.extract_words()
-    sub = [w for w in words if header_bottom < w["top"] < header_bottom + 30]
-    marks_x = sorted(w["x0"] for w in sub if w["text"] == "Marks")
-    place_x = sorted(w["x0"] for w in sub if w["text"] == "Place")
-    if len(marks_x) != n_judges or len(place_x) != n_judges:
+
+    marks_words = sorted((w for w in words if w["text"] == "Marks" and w["top"] < 200 and w["x0"] > 150),
+                         key=lambda w: w["x0"])
+    place_words = sorted((w for w in words if w["text"] == "Place" and w["top"] < 200 and w["x0"] > 150),
+                         key=lambda w: w["x0"])
+    if not marks_words or len(marks_words) != len(place_words):
         return None, None
-    column_x = list(zip(marks_x, place_x))
+    n_judges = len(marks_words)
+    marks_x = [w["x0"] for w in marks_words]
+    column_x = list(zip(marks_x, (w["x0"] for w in place_words)))
+
+    round_label_words = sorted((w for w in words if w["text"] == "Round" and w["top"] < 150), key=lambda w: w["top"])
+    if len(round_label_words) < 3:
+        return None, None
+    round_tops = [w["top"] for w in round_label_words[:3]]
+
+    # Judge names are grouped by GAP, not by forcing them into fixed bins tied
+    # to the Marks columns. Verified against a real file: a long surname
+    # ("Yzanne Cloonan Noone") can extend past the midpoint between two Marks
+    # columns, which silently misassigned words to the wrong judge under a
+    # midpoint-binning approach that was tried first -- it merged "Noone"
+    # into the NEXT judge's name instead of keeping it with "Yzanne Cloonan".
+    # Within one judge's name, the gap between consecutive words is ~2pt;
+    # between two different judges' names, it's 40pt+ -- confirmed directly
+    # against this file's actual word coordinates, a wide and reliable
+    # margin. x0 > 230 excludes the "Round N" label itself, which otherwise
+    # gets swept into the first judge's name (confirmed first judge names on
+    # this file consistently start past x0=238; the Round label ends by
+    # x0=221).
+    NAME_GAP_THRESHOLD = 20
+    names_by_round = []
+    for rtop in round_tops:
+        row_words = sorted([w for w in words if abs(w["top"] - rtop) < 4 and w["x0"] > 230],
+                           key=lambda w: w["x0"])
+        groups = []
+        for w in row_words:
+            if groups and (w["x0"] - groups[-1][-1]["x1"]) < NAME_GAP_THRESHOLD:
+                groups[-1].append(w)
+            else:
+                groups.append([w])
+        if len(groups) != n_judges:
+            return None, None  # can't reliably tell judges apart on this row -- don't guess
+        names_by_round.append([" ".join(gw["text"] for gw in g) for g in groups])
+
     return names_by_round, column_x
 
 
@@ -247,6 +282,29 @@ def parse_quickfeis_pdf(pdf_path):
             rank_words = sorted(
                 [w for w in candidates if any(abs((w["x0"] + w["x1"]) / 2 - rx) < 6 for rx in known_rank_xs)],
                 key=lambda w: w["top"])
+
+            # SEMANTIC recovery, independent of position clustering: a digit
+            # immediately followed by the literal text "(Tie)" on the same
+            # line IS an F-Place value, full stop -- the Dancer-number
+            # column never has "(Tie)" next to it. This catches tied rows
+            # that never reach min_cluster_size above (e.g. a single-page
+            # file with only 1-2 tied competitors total, nowhere to
+            # accumulate a confirmed tie-position from across pages) --
+            # confirmed live on a real 6-competitor file where 2 tied rows
+            # were silently dropped with zero warning even after the
+            # clustering fix above, because 2 instances never reaches the
+            # min_cluster_size=3 threshold needed to self-confirm.
+            already_have = {(round(w["top"], 1), round(w["x0"], 1)) for w in rank_words}
+            for tw in [w for w in page_words if w["text"] == "(Tie)"]:
+                same_line_digits = [w for w in candidates if abs(w["top"] - tw["top"]) < 3 and w["x0"] < tw["x0"]]
+                if not same_line_digits:
+                    continue
+                digit_word = max(same_line_digits, key=lambda w: w["x0"])  # nearest one to the left of "(Tie)"
+                key = (round(digit_word["top"], 1), round(digit_word["x0"], 1))
+                if key not in already_have:
+                    rank_words.append(digit_word)
+                    already_have.add(key)
+            rank_words.sort(key=lambda w: w["top"])
 
 
             for rw in rank_words:
