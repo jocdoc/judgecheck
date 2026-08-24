@@ -184,6 +184,39 @@ def _judge_columns_for_page(page):
     return names_by_round, column_x
 
 
+def _footer_boundary(page, words):
+    """Returns the y-position where the page footer begins, so table-row
+    detection can exclude it. Found live (twice now): the footer's own
+    text (a date, the event name, "Tabulated by QuickFeis") can contain
+    bare digits that accidentally match _RANK_PATTERN and get mistaken
+    for a real F Place value if their x-position happens to land in the
+    rank column -- and a FIXED pixel margin tuned to one file's footer
+    height/page size broke again on a different file with a taller page
+    and a 3-line footer instead of 2.
+
+    Anchored instead to the "Page N of M" pagination marker: confirmed
+    present on every page of every real file seen so far (two different
+    document families, two different page heights), and unlike the date,
+    venue, or event name, its wording never varies between competitions.
+    It also always sits on the SAME line as the rest of the footer's
+    topmost row in both families seen -- so its own top position IS the
+    footer boundary, no separate margin to tune per file.
+
+    Falls back to a page-height-relative margin only if no "Page ... of
+    ..." marker is found at all (an unrecognized template) -- better to
+    keep SOME protection than none, even though that fallback is the
+    same kind of unverified guess that broke once already.
+    """
+    page_word = next((w for w in words if w["text"] == "Page"), None)
+    if page_word is not None:
+        of_word = next((w for w in words
+                        if w["text"] == "of" and abs(w["top"] - page_word["top"]) < 3
+                        and w["x0"] > page_word["x0"]), None)
+        if of_word is not None:
+            return page_word["top"] - 2  # tiny buffer for sub-pixel row variance
+    return page.height - 60
+
+
 def parse_quickfeis_pdf(pdf_path):
     """
     Returns (rounds, competitor_index, warnings) -- same shape as before.
@@ -211,24 +244,14 @@ def parse_quickfeis_pdf(pdf_path):
 
             n_judges = len(column_x)
 
-            # Real bug found live: the page footer's second line ("2023 Mid
-            # America Oireachtas", or whatever the event name is) starts with
-            # a bare year number -- pure digits, so it matches _RANK_PATTERN
-            # just like a real F Place value. When that word's x-position
-            # happens to land in the same column as the actual rank box
-            # (varies per file depending on judge-panel width), it gets
-            # mistaken for a dancer's rank, and the parser then fails to find
-            # a real name/school around it and logs a false "couldn't read
-            # dancer info" warning -- confusing on files where it doesn't
-            # happen to align, since the same footer text is on every page
-            # but only *some* panel layouts put it in the rank column's path.
-            # Verified against this real file: every genuine dancer row's
-            # rank-box sits above top=513, while the footer starts at
-            # top=562 -- a ~49pt gap. Excluding the bottom 60pt of the page
-            # keeps a comfortable margin on both sides without needing to
-            # match the footer's actual wording (which varies by event).
+            # Real bug found live (see _footer_boundary's docstring for the
+            # full history -- a fixed pixel margin here originally, which
+            # broke again on a file with a different page height/footer
+            # size, is why this now uses the semantic "Page N of M" anchor
+            # instead of a number tuned to one specific file.
+            footer_top = _footer_boundary(page, page_words)
             candidates = [w for w in page_words if 20 <= w["x0"] <= 100
-                         and 90 < w["top"] < page.height - 60
+                         and 90 < w["top"] < footer_top
                          and _RANK_PATTERN.match(w["text"])]
             if not candidates:
                 continue
