@@ -159,7 +159,8 @@ def parse_quickfeis_pdf(pdf_path):
     round_rows = {0: [], 1: [], 2: []}
     judge_names_by_round = None
     column_x = None
-    known_rank_x = None  # persisted once confidently detected -- see below
+    known_rank_xs = set()  # persisted once confidently detected -- see below (a SET,
+                            # not a single value -- see the "REAL BUG FOUND LIVE" note)
 
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
@@ -175,7 +176,24 @@ def parse_quickfeis_pdf(pdf_path):
 
             n_judges = len(column_x)
 
-            candidates = [w for w in page_words if 20 <= w["x0"] <= 100 and w["top"] > 90
+            # Real bug found live: the page footer's second line ("2023 Mid
+            # America Oireachtas", or whatever the event name is) starts with
+            # a bare year number -- pure digits, so it matches _RANK_PATTERN
+            # just like a real F Place value. When that word's x-position
+            # happens to land in the same column as the actual rank box
+            # (varies per file depending on judge-panel width), it gets
+            # mistaken for a dancer's rank, and the parser then fails to find
+            # a real name/school around it and logs a false "couldn't read
+            # dancer info" warning -- confusing on files where it doesn't
+            # happen to align, since the same footer text is on every page
+            # but only *some* panel layouts put it in the rank column's path.
+            # Verified against this real file: every genuine dancer row's
+            # rank-box sits above top=513, while the footer starts at
+            # top=562 -- a ~49pt gap. Excluding the bottom 60pt of the page
+            # keeps a comfortable margin on both sides without needing to
+            # match the footer's actual wording (which varies by event).
+            candidates = [w for w in page_words if 20 <= w["x0"] <= 100
+                         and 90 < w["top"] < page.height - 60
                          and _RANK_PATTERN.match(w["text"])]
             if not candidates:
                 continue
@@ -189,17 +207,46 @@ def parse_quickfeis_pdf(pdf_path):
             # competitor-ID column has any digits at all) can't actually prove
             # anything, and blindly trusting it there previously caused the
             # wrong column to silently override an already-correct one.
+            #
+            # REAL BUG FOUND LIVE: a tied F Place ("68 (Tie)") renders its
+            # digit measurably further LEFT than the same digit alone ("68")
+            # would, because the digit and "(Tie)" are centered together as
+            # one unit within a fixed-width box. On a page with several ties,
+            # this creates a THIRD x-cluster -- tied F-Place values, untied
+            # F-Place values, and the Dancer-number column -- and the old
+            # logic ("pick the leftmost cluster," written back when only 2
+            # clusters were ever possible) grabbed the tied-only subset,
+            # silently dropping every UNTIED competitor on that page from the
+            # archive with no warning at all. Confirmed against this real
+            # file: page 9 has [tied F-Place=32.2, untied F-Place=46.5,
+            # Dancer#=61.1] -- the old code kept only the 3 tied rows and
+            # dropped the other 5 real competitors on that page.
+            #
+            # FIX: the Dancer-number column is reliably the RIGHTMOST cluster
+            # (it's always further right than F Place in this template, with
+            # or without ties present), so accept every OTHER cluster as a
+            # valid F-Place position, however many sub-clusters ties happen
+            # to split it into on a given page.
             clusters = _find_x_clusters(candidates)
             if len(clusters) >= 2:
-                known_rank_x = clusters[0]
-            elif known_rank_x is None and clusters:
-                known_rank_x = clusters[0]  # only choice available so far -- best effort
-            if known_rank_x is None:
+                # Accumulate (never discard) -- a page with only ONE tied row
+                # can't independently reach min_cluster_size on its own tie
+                # sub-position, so it must be able to rely on a tie position
+                # confirmed by an EARLIER page, not just what this page alone
+                # proves. Confirmed against this real file: page 9 has 3 tied
+                # rows (enough to self-confirm x=32.2), but page 10 has only
+                # 1 tied row -- replacing instead of accumulating here caused
+                # that one competitor to be silently dropped even after the
+                # main fix above.
+                known_rank_xs |= set(clusters[:-1])  # everything except Dancer# (rightmost)
+            elif not known_rank_xs and clusters:
+                known_rank_xs = set(clusters)  # only choice available so far -- best effort
+            if not known_rank_xs:
                 continue
-            rank_x = known_rank_x
 
-            rank_words = sorted([w for w in candidates if abs((w["x0"] + w["x1"]) / 2 - rank_x) < 6],
-                                key=lambda w: w["top"])
+            rank_words = sorted(
+                [w for w in candidates if any(abs((w["x0"] + w["x1"]) / 2 - rx) < 6 for rx in known_rank_xs)],
+                key=lambda w: w["top"])
 
 
             for rw in rank_words:
