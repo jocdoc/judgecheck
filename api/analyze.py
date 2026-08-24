@@ -1128,6 +1128,20 @@ def analyze_payload(payload):
                  "recompute_worst_judges_tally"):
         from . import db
 
+        # REAL BUG FOUND LIVE: ensure_schema() was defined in db.py (its own
+        # docstring says "safe to call on every request") but nothing ever
+        # actually called it. The original events/marks tables must have
+        # been created some other way when the project was first set up --
+        # so this went unnoticed until a later schema change (the
+        # worst_judges_cache table) was added to schema.sql and had no path
+        # that would ever create it on the live database, causing every
+        # worst-judges action to fail with "relation does not exist" while
+        # everything else kept working. Calling it here, unconditionally,
+        # for every DB-touching action closes that gap for good -- any
+        # future schema.sql change now self-heals on the next request
+        # instead of silently requiring a manual migration step.
+        db.ensure_schema()
+
         if action == "check_duplicate":
             existing = db.already_ingested(payload["content_hash"])
             return {"duplicate": existing is not None, "existing": existing}
