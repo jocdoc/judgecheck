@@ -52,3 +52,22 @@ CREATE INDEX IF NOT EXISTS idx_marks_event      ON marks (event_id);
 -- queries directly instead of intersecting two single-column indexes.
 CREATE INDEX IF NOT EXISTS idx_marks_judge_team       ON marks (judge_name, team);
 CREATE INDEX IF NOT EXISTS idx_marks_judge_competitor ON marks (judge_name, competitor_name);
+
+-- BOUNDED, DELIBERATE EXCEPTION to the "raw marks only, never pre-computed
+-- statistics" principle stated above. This table caches the homepage
+-- "worst judges" tally. It's justified specifically because:
+--   1. It is always fully reconstructable from the marks table alone --
+--      never a competing source of truth, unlike a stored z-score would be.
+--   2. It is refreshed explicitly by application code right after a
+--      successful import (see analyze.py), never left to silently drift
+--      the way an ad-hoc cached statistic could.
+--   3. Recomputing it live on every homepage load was judged not worth the
+--      cost as the archive grows -- this is a UI-latency optimization, not
+--      a change to how any statistic is defined or trusted.
+-- If the tally logic itself ever changes, it's always safe to TRUNCATE this
+-- table; the next successful import repopulates it from scratch.
+CREATE TABLE IF NOT EXISTS worst_judges_cache (
+    id          INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),  -- singleton row
+    computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    data        JSONB NOT NULL
+);
