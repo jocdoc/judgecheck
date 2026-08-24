@@ -296,6 +296,59 @@ def list_events(limit=100):
         conn.close()
 
 
+def latest_import_timestamp():
+    """The ingested_at of the most recently saved event, or None if the
+    archive is empty. Used to answer 'has anything new landed since the
+    tally was last recomputed' without pulling any actual round data --
+    a single-row MAX() lookup, not an archive scan."""
+    conn = _connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(ingested_at) FROM events")
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def get_worst_judges_cache():
+    """Returns the cached worst-judges tally dict (with a 'computed_at' ISO
+    timestamp added), or None if it's never been computed yet -- e.g. right
+    after ensure_schema() on a brand-new database, before any import has
+    happened. Read-only, cheap: a single-row lookup, not an archive scan."""
+    conn = _connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT data, computed_at FROM worst_judges_cache WHERE id = 1")
+            row = cur.fetchone()
+            if not row:
+                return None
+            data, computed_at = row
+            return {**data, "computed_at": computed_at.isoformat()}
+    finally:
+        conn.close()
+
+
+def set_worst_judges_cache(data):
+    """Recomputes and stores the tally. Called by analyze.py right after a
+    successful import (an event actually saved, not a duplicate/no-op) --
+    deliberately NOT called on a plain page load or archive search, per the
+    explicit decision that this only needs to update when new data lands,
+    not run continuously."""
+    conn = _connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO worst_judges_cache (id, computed_at, data)
+                   VALUES (1, now(), %s)
+                   ON CONFLICT (id) DO UPDATE SET computed_at = now(), data = EXCLUDED.data""",
+                (json.dumps(data),),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def search_names(prefix, kind="competitor_name", limit=15):
     """Powers a type-ahead search box -- kind is 'competitor_name',
     'judge_name', or 'team'."""
