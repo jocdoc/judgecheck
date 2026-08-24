@@ -154,6 +154,7 @@ def competitor_watch(events, min_shared_events=3, q_threshold=0.10):
                         "match_method": grp["method"].iloc[0],
                         "events": len(grp), "avg_gap": float(gaps.mean()),
                         "event_labels": sorted(grp["label"].unique().tolist()),
+                        "n_distinct_events": _distinct_competitions(grp["label"].tolist()),
                         "direction": "favored" if gaps.mean() > 0 else "punished", "p": float(p)})
     if not results:
         return [], 0, {"name": match_method_counts.get("name", 0), "competitor_id": match_method_counts.get("competitor_id", 0)}
@@ -211,6 +212,7 @@ def team_watch(events, min_observations=5, q_threshold=0.10):
         results.append({"team": team, "judge": judge, "n_competitors": len(grp),
                         "n_rounds": grp["event"].nunique(), "avg_gap": float(gaps.mean()),
                         "event_labels": sorted(grp["event"].unique().tolist()),
+                        "n_distinct_events": _distinct_competitions(grp["event"].tolist()),
                         "direction": "favored" if gaps.mean() > 0 else "punished", "p": float(p)})
     if not results:
         return [], 0
@@ -329,6 +331,10 @@ h2{font-family:'IBM Plex Mono',monospace;font-size:11.5px;letter-spacing:.1em;te
 .clear-list-toggle{background:transparent;border:none;padding:0;margin-top:8px}
 .clear-list-row{display:flex;justify-content:space-between;color:var(--ink-soft);font-size:12px;padding:5px 0;border-bottom:1px solid var(--line)}
 .clear-list-row:last-child{border-bottom:none}
+.multi-school-banner{background:var(--flag-bg);border:1px solid var(--flag);border-radius:8px;padding:16px 18px;margin-bottom:20px}
+.multi-school-title{font-family:'Fraunces',serif;font-weight:700;font-size:15px;color:var(--flag);margin-bottom:6px}
+.multi-school-banner p{font-size:13px;line-height:1.5;margin:0;color:var(--ink)}
+.watch-meta.recurring{color:var(--flag);font-weight:600;margin-top:2px}
 details{background:var(--paper-raised);border:1px solid var(--line);border-radius:8px;padding:14px 16px}
 summary{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--ink-soft);cursor:pointer}
 .tech-table{margin-top:12px;font-family:'IBM Plex Mono',monospace;font-size:12px;width:100%;border-collapse:collapse}
@@ -516,6 +522,20 @@ def _count_distinct_events(rounds):
     text needs to say the right one."""
     sources = set()
     for label, _, _ in rounds:
+        source = label.split(" \u2014 ", 1)[0] if " \u2014 " in label else label
+        sources.add(source)
+    return len(sources)
+
+
+def _distinct_competitions(labels):
+    """Same COMPETITION-vs-ROUND distinction as _count_distinct_events, but
+    takes plain labels instead of full round tuples -- needed for judge/team
+    flag results, where a single competition can contribute 2-3 round
+    labels (Round 1/2/3) to the SAME flagged pattern. Without this, 'seen
+    across 3 rounds' would misleadingly look like 3 separate competitions
+    when it might all be one."""
+    sources = set()
+    for label in labels:
         source = label.split(" \u2014 ", 1)[0] if " \u2014 " in label else label
         sources.add(source)
     return len(sources)
@@ -951,32 +971,79 @@ in the archive.</p></div>"""
         breakdown_html = f"""<section class="block"><h2>Events On Record</h2>
 {stat_row}{notable_html}{clear_html}</section>"""
 
-    # --- Cross-event flagged patterns (unchanged logic, kept as the headline signal) ---
+    # --- Cross-event flagged patterns (kept as the headline signal) ---
     cards = []
     for r in comp_flagged:
         word = "Favored" if r["direction"] == "favored" else "Punished"
         verb = "scored higher" if r["direction"] == "favored" else "scored lower"
+        n_dist = r.get("n_distinct_events", 1)
+        if n_dist > 1:
+            recur_note = (f'<div class="watch-meta recurring">Seen in {n_dist} separate '
+                          f'competitions, not just one event</div>')
+        else:
+            recur_note = '<div class="watch-meta">Seen in 1 competition so far</div>'
         cards.append(
             f'<div class="watch-card {r["direction"]}"><div class="watch-card-top"><div>'
             f'<div class="watch-who">{r["display"]} &middot; {r["judge"]}</div>'
-            f'<div class="watch-meta">{r["events"]} shared rounds</div></div>'
+            f'<div class="watch-meta">{r["events"]} shared rounds</div>'
+            f'{recur_note}</div>'
             f'<div class="pill {"favored-flag" if r["direction"]=="favored" else "punished-flag"}">{word}</div></div>'
             f'<p class="watch-detail">Consistently {verb} than the rest of the panel. '
             f'Estimated chance this is a false alarm: <b>{r["q"]*100:.1f}%</b>.</p></div>')
     for r in team_flagged:
         word = "Favored" if r["direction"] == "favored" else "Punished"
         verb = "scored higher" if r["direction"] == "favored" else "scored lower"
+        # How many SEPARATE competitions this pattern has shown up in, not just
+        # how many rounds -- one competition can contribute 2-3 rounds on its
+        # own, which would otherwise look like recurrence when it isn't.
+        n_dist = r.get("n_distinct_events", 1)
+        if n_dist > 1:
+            recur_note = (f'<div class="watch-meta recurring">Seen in {n_dist} separate '
+                          f'competitions, not just one event</div>')
+        else:
+            recur_note = '<div class="watch-meta">Seen in 1 competition so far</div>'
         cards.append(
             f'<div class="watch-card {r["direction"]}"><div class="watch-card-top"><div>'
             f'<div class="watch-who">{r["team"]} &middot; {r["judge"]}</div>'
-            f'<div class="watch-meta">{r["n_competitors"]} competitors across {r["n_rounds"]} rounds</div></div>'
+            f'<div class="watch-meta">{r["n_competitors"]} competitors across {r["n_rounds"]} rounds</div>'
+            f'{recur_note}</div>'
             f'<div class="pill {"favored-flag" if r["direction"]=="favored" else "punished-flag"}">{word}</div></div>'
             f'<p class="watch-detail">Consistently {verb} than the rest of the panel for this school\'s competitors. '
             f'Estimated chance this is a false alarm: <b>{r["q"]*100:.1f}%</b>.</p></div>')
 
+    # --- Multiple-subjects callouts (judge lookups only): a pattern that
+    # touches more than one school -- or more than one individual competitor
+    # -- is a materially different, stronger signal than a single flagged
+    # subject. A single flagged competitor or school could be one bad event,
+    # or one pairing that happens to coincide with a particularly strong or
+    # weak dancer. Multiple DIFFERENT subjects is much harder to explain away
+    # by anything other than the judge themselves. This is pure counting over
+    # already-validated competitor_watch/team_watch results, not a new
+    # statistical test.
+    multi_school_html = ""
+    if subject_kind == "judge" and len(team_flagged) > 1:
+        school_bits = ", ".join(
+            f'{r["team"]} ({"favored" if r["direction"] == "favored" else "punished"})' for r in team_flagged)
+        multi_school_html = f"""<div class="multi-school-banner">
+<div class="multi-school-title">Pattern spans multiple schools</div>
+<p>This judge has been flagged for a consistent scoring pattern with <b>{len(team_flagged)} different
+schools</b>: {school_bits}. A pattern that recurs across more than one school is harder to explain by
+chance alone than a single flagged school on its own.</p></div>"""
+
+    multi_competitor_html = ""
+    if subject_kind == "judge" and len(comp_flagged) > 1:
+        competitor_bits = ", ".join(
+            f'{r["display"]} ({"favored" if r["direction"] == "favored" else "punished"})' for r in comp_flagged)
+        multi_competitor_html = f"""<div class="multi-school-banner">
+<div class="multi-school-title">Pattern spans multiple competitors</div>
+<p>This judge has been flagged for a consistent scoring pattern with <b>{len(comp_flagged)} different
+competitors</b>: {competitor_bits}. A pattern that recurs across more than one individual competitor is
+harder to explain by chance alone than a single flagged competitor on its own.</p></div>"""
+
     patterns_html = ""
     if cards:
-        patterns_html = f'<section class="block"><h2>Flagged Patterns</h2>{"".join(cards)}</section>'
+        patterns_html = (f'<section class="block"><h2>Flagged Patterns</h2>'
+                         f'{multi_competitor_html}{multi_school_html}{"".join(cards)}</section>')
     elif subject_kind != "judge":
         # judge lookups already show the stat-row/no-pattern state above; team/competitor
         # lookups have no per-event breakdown, so they still need their own clear-state message.
