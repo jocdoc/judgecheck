@@ -1075,46 +1075,149 @@ def _parse_iso(iso_string):
     without adding a second db function just for an internal comparison."""
     return datetime.fromisoformat(iso_string)
 
+MIN_EVENTS_FOR_RATE_RANKING = 3  # a judge needs at least this many events
+# judged before their Second-Look+Flagged rate is shown at all -- matches
+# the project's existing minimum-data convention (competitor_watch's own
+# min_shared_events=3). Without this, a judge who's only judged 1-2 events
+# can show a misleadingly perfect 100% (or 0%) rate that isn't really a
+# track record yet.
+MIN_NONCLEAR_EVENTS_FOR_CONSISTENCY = 2  # a "how consistent is the concern"
+# metric needs at least 2 non-clear (Second Look or Flagged) events to
+# average over -- averaging a single q value isn't measuring consistency,
+# it's just restating that one event's result under a different name.
 
-def _compute_worst_judges_tally(rounds):
-    """Archive-wide aggregation over already-validated competitor_watch/
-    team_watch results -- pure counting, not a new statistical test, so no
-    new Monte Carlo validation is needed here (see prior sessions for why
-    that distinction matters). Returns the same {by_count, by_q,
-    n_judges_with_flags} shape whether called live or from the cache
-    refresh path below."""
-    if not rounds:
-        return {"by_count": [], "by_q": [], "n_judges_with_flags": 0}
 
+def _archive_wide_event_severity(rounds):
+    """Generalizes judge_event_breakdown (which classifies one judge's
+    events at a time, for the single-judge lookup page) to classify EVERY
+    (judge, event) pair's severity in a single pass over the whole archive.
+
+    This deliberately does NOT call judge_event_breakdown / _compute_subject_flags
+    once per judge -- either of those reruns competitor_watch/team_watch from
+    scratch on every call, and looping that once per judge across the whole
+    archive would reproduce exactly the kind of N+1 pattern that caused the
+    original worst-judges recompute timeout (see db.py's _rounds_where fix).
+    competitor_watch/team_watch are each called ONCE here, and every judge's
+    events are classified from those same two result sets.
+
+    Uses the exact same severity rule already established by
+    judge_event_breakdown, unchanged: 'clear' if no flag traces back to this
+    event; 'second_look' if the best (lowest) q among flags tracing to this
+    event is >= 0.05; 'flagged' if < 0.05. This is pure aggregation over
+    already-validated competitor_watch/team_watch results, not a new
+    statistical test, so it needs no new Monte Carlo validation of its own
+    -- same reasoning judge_event_breakdown's own docstring already
+    established, just applied archive-wide instead of to one judge.
+    Verified to reproduce judge_event_breakdown's per-judge output exactly
+    via direct diff-testing before this shipped.
+
+    Returns {judge_name: [{'label', 'severity', 'q'}, ...]} -- one entry per
+    event that judge appeared in; 'q' is None for 'clear' events, since no
+    flag (and therefore no q) exists for them."""
     comp_results, _, _ = competitor_watch(rounds)
     team_results, _ = team_watch(rounds)
     comp_flagged = [r for r in comp_results if r.get("flagged")]
     team_flagged = [r for r in team_results if r.get("flagged")]
 
-    per_judge = {}
+    flags_by_judge_event = {}
     for r in comp_flagged:
-        per_judge.setdefault(r["judge"], []).append(
-            {"kind": "competitor", "subject": r["display"], "q": r["q"], "direction": r["direction"]})
+        for lbl in r["event_labels"]:
+            flags_by_judge_event.setdefault((r["judge"], lbl), []).append(r["q"])
     for r in team_flagged:
-        per_judge.setdefault(r["judge"], []).append(
-            {"kind": "school", "subject": r["team"], "q": r["q"], "direction": r["direction"]})
+        for lbl in r["event_labels"]:
+            flags_by_judge_event.setdefault((r["judge"], lbl), []).append(r["q"])
 
-    by_count = sorted(
-        [{"judge": j,
-          "count": len(items),
-          "n_schools": sum(1 for it in items if it["kind"] == "school"),
-          "n_competitors": sum(1 for it in items if it["kind"] == "competitor")}
-         for j, items in per_judge.items()],
-        key=lambda x: -x["count"])[:5]
+    per_judge_events = {}
+    for label, df, judge_cols in rounds:
+        for judge in judge_cols:
+            qs = flags_by_judge_event.get((judge, label))
+            if not qs:
+                entry = {"label": label, "severity": "clear", "q": None}
+            else:
+                best_q = min(qs)
+                severity = "flagged" if best_q < 0.05 else "second_look"
+                entry = {"label": label, "severity": severity, "q": best_q}
+            per_judge_events.setdefault(judge, []).append(entry)
+    return per_judge_events
 
-    by_q_rows = []
-    for j, items in per_judge.items():
-        best = min(items, key=lambda it: it["q"])
-        by_q_rows.append({"judge": j, "q": best["q"], "subject": best["subject"],
-                          "kind": best["kind"], "direction": best["direction"]})
-    by_q = sorted(by_q_rows, key=lambda x: x["q"])[:5]
 
-    return {"by_count": by_count, "by_q": by_q, "n_judges_with_flags": len(per_judge)}
+def _worst_judges_by_rate(per_judge_events, min_events=MIN_EVENTS_FOR_RATE_RANKING, top_n=10):
+    """List 1: what fraction of a judge's judged events were Second Look or
+    Flagged, out of every event they judged. Ties broken by more events
+    judged (a rate backed by a bigger track record ranks above the same
+    rate from fewer events)."""
+    rows = []
+    for judge, events in per_judge_events.items():
+        n_total = len(events)
+        if n_total < min_events:
+            continue
+        n_second_look = sum(1 for e in events if e["severity"] == "second_look")
+        n_flagged = sum(1 for e in events if e["severity"] == "flagged")
+        n_notable = n_second_look + n_flagged
+        rows.append({"judge": judge, "n_total": n_total, "n_second_look": n_second_look,
+                    "n_flagged": n_flagged, "n_notable": n_notable,
+                    "rate": n_notable / n_total})
+    rows.sort(key=lambda x: (-x["rate"], -x["n_total"]))
+    return rows[:top_n]
+
+
+def _worst_judges_by_avg_q(per_judge_events, min_nonclear=MIN_NONCLEAR_EVENTS_FOR_CONSISTENCY, top_n=10):
+    """List 2: the plain average of q across a judge's own Second Look/
+    Flagged events only ('clear' events have no q and are excluded, not
+    treated as q=1 -- this measures the typical severity of THIS judge's
+    OWN incidents, not how rare incidents are for them, which is what List 1
+    already covers).
+
+    A HIGHER average here means a judge's typical flagged/second-look event
+    tends to be more borderline rather than severely anomalous, but recurs
+    across multiple events -- a persistent low-grade pattern rather than one
+    severe outlier. A judge with a single very extreme event (tiny q) and
+    otherwise clear events won't dominate this list even though that one
+    event might be alarming on its own -- that's what List 1's rate and the
+    single-judge lookup's Flagged count are for. Requires at least
+    min_nonclear qualifying events; ties broken by more qualifying events."""
+    rows = []
+    for judge, events in per_judge_events.items():
+        qs = [e["q"] for e in events if e["q"] is not None]
+        if len(qs) < min_nonclear:
+            continue
+        rows.append({"judge": judge, "avg_q": sum(qs) / len(qs), "n_nonclear": len(qs)})
+    rows.sort(key=lambda x: (-x["avg_q"], -x["n_nonclear"]))
+    return rows[:top_n]
+
+
+def _compute_worst_judges_tally(rounds):
+    """Archive-wide, landing-page rankings. Both lists are pure aggregation
+    over the SAME already-validated per-event severity classification that
+    powers the single-judge lookup page's Clear/Second Look/Flagged
+    breakdown (judge_event_breakdown) -- computed once archive-wide here
+    (see _archive_wide_event_severity) instead of once per judge, so
+    neither list is a new statistical test and neither needs its own Monte
+    Carlo validation.
+
+    by_rate: judges ranked by what fraction of their events were notable
+    (Second Look or Flagged) -- 'how often is this judge under any
+    suspicion at all'.
+    by_consistency: judges ranked by the average q of their own non-clear
+    events -- 'when this judge has a notable event, how borderline-but-
+    recurring is the typical pattern', a different axis from severity or
+    frequency alone. See _worst_judges_by_avg_q's docstring for why a
+    HIGHER average is the 'worse' direction here.
+
+    Returns {by_rate, by_consistency, n_judges_with_flags}."""
+    if not rounds:
+        return {"by_rate": [], "by_consistency": [], "n_judges_with_flags": 0}
+
+    per_judge_events = _archive_wide_event_severity(rounds)
+    n_judges_with_flags = sum(
+        1 for events in per_judge_events.values()
+        if any(e["severity"] != "clear" for e in events))
+
+    by_rate = _worst_judges_by_rate(per_judge_events)
+    by_consistency = _worst_judges_by_avg_q(per_judge_events)
+
+    return {"by_rate": by_rate, "by_consistency": by_consistency,
+            "n_judges_with_flags": n_judges_with_flags}
 
 
 def analyze_payload(payload):
@@ -1242,7 +1345,7 @@ def analyze_payload(payload):
             # before the very first recompute has ever been run.
             cached = db.get_worst_judges_cache()
             if cached is None:
-                return {"by_count": [], "by_q": [], "n_judges_with_flags": 0, "computed_at": None}
+                return {"by_rate": [], "by_consistency": [], "n_judges_with_flags": 0, "computed_at": None}
             return cached
 
         if action == "recompute_worst_judges_tally":
@@ -1260,9 +1363,9 @@ def analyze_payload(payload):
                 # Archive is completely empty -- nothing to compute, but not
                 # an error; distinguishable from "cache never computed" via
                 # up_to_date=True so the frontend doesn't imply stale data.
-                return {"by_count": [], "by_q": [], "n_judges_with_flags": 0,
+                return {"by_rate": [], "by_consistency": [], "n_judges_with_flags": 0,
                        "computed_at": None, "recomputed": False, "up_to_date": True}
-
+               
             if cached is not None and latest_import <= _parse_iso(cached["computed_at"]):
                 # Nothing new since last recompute -- return the existing
                 # cache unchanged rather than re-scanning the whole archive
