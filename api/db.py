@@ -171,22 +171,43 @@ def _rounds_where(cur, where_clause, params):
     then fetch the COMPLETE panel data for each -- see module docstring
     for why the full round is needed, not just the filtered rows.
 
-    REWRITTEN from a per-round query loop (1 query to list rounds, then 1
-    MORE query per round to fetch its marks -- an N+1 pattern) to a single
-    query that pulls every matching mark at once, grouped in Python by
-    (event_id, round_label) afterward. The old version's per-round
-    round-trips to the database scaled linearly with archive size and were
-    the direct cause of the "worst judges" recompute timing out once the
-    archive grew past ~100+ rounds. The ORDER BY is required: itertools
-    groupby only groups CONSECUTIVE matching rows, so the rows must already
-    be sorted by the group key before we iterate."""
+    TWO SEPARATE QUERIES, DELIBERATELY: the first finds which
+    (event_id, round_label) keys match the filter; the second fetches the
+    FULL PANEL (every judge, every mark) for exactly those keys, with NO
+    filter applied to the second query. This distinction is not optional --
+    an EARLIER version applied where_clause to a single combined query
+    directly, which happened to work for the unconditional full-archive
+    fetch (fetch_all_rounds) but silently broke every SCOPED fetch
+    (fetch_rounds_for_judge, fetch_rounds_for_team): filtering by
+    "judge_name = X" doesn't just find X's rounds, it also discards every
+    OTHER judge's marks in those same rounds, leaving nothing for the
+    gap-vs-panel comparison to compare against. That produced a real
+    production bug where a specific judge's single-judge lookup silently
+    showed all-clear despite the archive-wide tally correctly flagging her
+    16 times -- caught only by directly diffing the two code paths against
+    real production data, not by synthetic testing, since the earlier
+    synthetic db.py tests only checked the ROUND-GROUPING logic on data
+    that was already correct, never a genuinely FILTERED query end-to-end.
+
+    Still just 2 total queries regardless of archive size (not the N+1
+    per-round pattern this was originally rewritten to avoid -- see below).
+    The ORDER BY is required: itertools groupby only groups CONSECUTIVE
+    matching rows, so the rows must already be sorted by the group key
+    before we iterate."""
+    cur.execute(f"SELECT DISTINCT event_id, round_label FROM marks WHERE {where_clause}", params)
+    keys = cur.fetchall()
+    if not keys:
+        return []
+
+    event_ids = [k[0] for k in keys]
+    round_labels = [k[1] for k in keys]
     cur.execute(
-        f"""SELECT m.event_id, m.round_label, e.title, m.competitor_number,
-                   m.competitor_name, m.team, m.judge_name, m.mark
-            FROM marks m JOIN events e ON e.id = m.event_id
-            WHERE {where_clause}
-            ORDER BY m.event_id, m.round_label""",
-        params,
+        """SELECT m.event_id, m.round_label, e.title, m.competitor_number,
+                  m.competitor_name, m.team, m.judge_name, m.mark
+           FROM marks m JOIN events e ON e.id = m.event_id
+           WHERE (m.event_id, m.round_label) IN (SELECT * FROM unnest(%s::int[], %s::text[]))
+           ORDER BY m.event_id, m.round_label""",
+        (event_ids, round_labels),
     )
     all_rows = cur.fetchall()
 
