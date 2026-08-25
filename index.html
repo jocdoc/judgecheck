@@ -712,20 +712,7 @@ function renderWjBox(){
     });
   }
 
-  document.getElementById('wjStatusText').textContent =
-    'Last updated: ' + formatWjTimestamp(wjData.computed_at);
-}
-
-  document.getElementById('wjStatusText').textContent =
-    'Last updated: ' + formatWjTimestamp(wjData.computed_at);
-}
-
-document.getElementById('wjToggleBtn').addEventListener('click', () => {
-  wjView = wjView === 'count' ? 'q' : 'count';
-  renderWjBox();
-});
-
-async function loadWorstJudgesTally(){
+  async function loadWorstJudgesTally(){
   try {
     const res = await fetch('/api/analyze', {
       method: 'POST', headers: {'Content-Type':'application/json'},
