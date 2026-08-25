@@ -41,7 +41,10 @@ h1 em{font-style:italic;font-weight:500;color:var(--clear)}
 
 .card-header-row{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:4px}
 .card-header-row .card-header-main{flex:1;min-width:220px}
-.wj-box{flex:0 0 auto;width:240px;background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.wj-box{width:100%;box-sizing:border-box;background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:14px 0 18px}
+.wj-lists{display:flex;gap:28px;flex-wrap:wrap}
+.wj-list{flex:1 1 260px;min-width:240px}
+.wj-list-sub{font-size:11px;color:var(--ink-soft);margin:-4px 0 8px;line-height:1.35}
 .wj-box-title{font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--brass);margin:0 0 8px;display:flex;justify-content:space-between;align-items:center}
 .wj-toggle{background:none;border:none;color:var(--ink-soft);font-family:'Instrument Sans',sans-serif;font-size:11px;cursor:pointer;text-decoration:underline;padding:0}
 .wj-row{display:flex;align-items:baseline;gap:8px;font-size:12.5px;padding:4px 0;border-bottom:1px solid var(--line)}
@@ -176,16 +179,25 @@ table.preview-table tr:nth-child(even) td{background:#FAFAF8}
         <h2>Search the archive</h2>
         <p class="upload-sub">Look up everything on record for a specific judge, school, or competitor, pooled across every competition that's been saved to the archive.</p>
       </div>
-      <div class="wj-box" id="wjBox">
-        <p class="wj-box-title"><span id="wjBoxTitle">Most flagged judges</span>
-          <button class="wj-toggle" id="wjToggleBtn">by severity</button></p>
-        <div id="wjBoxBody"><p class="wj-loading">loading&hellip;</p></div>
-        <div class="wj-footer">
-          <button class="wj-toggle" id="wjRecomputeBtn">Recompute now</button>
-          <span id="wjStatusText" class="wj-status"></span>
+    </div>
+    <div class="wj-box" id="wjBox">
+      <div class="wj-lists">
+        <div class="wj-list">
+          <p class="wj-box-title">Highest flag rate</p>
+          <p class="wj-list-sub">Share of judged events that were Second Look or Flagged</p>
+          <div id="wjBoxBodyRate"><p class="wj-loading">loading&hellip;</p></div>
         </div>
-        <p class="wj-note">Statistical screening only, not proof of misconduct.</p>
+        <div class="wj-list">
+          <p class="wj-box-title">Least consistent</p>
+          <p class="wj-list-sub">Average q across a judge's own Second Look / Flagged events</p>
+          <div id="wjBoxBodyConsistency"><p class="wj-loading">loading&hellip;</p></div>
+        </div>
       </div>
+      <div class="wj-footer">
+        <button class="wj-toggle" id="wjRecomputeBtn">Recompute now</button>
+        <span id="wjStatusText" class="wj-status"></span>
+      </div>
+      <p class="wj-note">Statistical screening only, not proof of misconduct. Judges need enough events on record before either metric is shown.</p>
     </div>
     <div class="actions" style="margin-top:0;flex-wrap:wrap;">
       <select id="archiveSearchKind" class="btn-ghost" style="padding:12px 14px;border-radius:8px;border:1px solid var(--line);font-family:'Instrument Sans',sans-serif;font-size:14.5px;background:#fff;">
@@ -645,7 +657,6 @@ document.getElementById('archiveSearchName').addEventListener('keydown', e => {
 // archive search used elsewhere on this page, matching the existing
 // "did you mean" suggestion-chip UX.
 let wjData = null;
-let wjView = 'count'; // 'count' or 'q'
 
 function formatWjTimestamp(iso){
   if (!iso) return 'never';
@@ -653,37 +664,57 @@ function formatWjTimestamp(iso){
   return d.toLocaleString(undefined, {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
 }
 
+function wjRowClickHandler(judgeName){
+  return () => {
+    document.getElementById('archiveSearchKind').value = 'query_judge';
+    document.getElementById('archiveSearchName').value = judgeName;
+    runArchiveSearch();
+    document.getElementById('archiveSearchCard').scrollIntoView({behavior:'smooth', block:'start'});
+  };
+}
+
 function renderWjBox(){
-  const body = document.getElementById('wjBoxBody');
-  const title = document.getElementById('wjBoxTitle');
-  const toggle = document.getElementById('wjToggleBtn');
   if (!wjData) return;
 
-  const rows = wjView === 'count' ? wjData.by_count : wjData.by_q;
-  title.textContent = wjView === 'count' ? 'Most flagged judges' : 'Most severe flags';
-  toggle.textContent = wjView === 'count' ? 'by severity' : 'by count';
-
-  if (!rows || rows.length === 0) {
-    body.innerHTML = '<p class="wj-empty">No flagged patterns yet.</p>';
+  const rateBody = document.getElementById('wjBoxBodyRate');
+  const rateRows = wjData.by_rate;
+  if (!rateRows || rateRows.length === 0) {
+    rateBody.innerHTML = '<p class="wj-empty">Not enough data yet.</p>';
   } else {
-    body.innerHTML = rows.map((r, i) => {
-      const metric = wjView === 'count'
-        ? `${r.count}&times;`
-        : `${(r.q * 100).toFixed(2)}%`;
+    rateBody.innerHTML = rateRows.map((r, i) => {
+      const detail = `${r.n_second_look}\u00a02nd\u00a0look, ${r.n_flagged}\u00a0flagged of ${r.n_total}`;
       return `<div class="wj-row"><span class="wj-rank">${i + 1}.</span>` +
         `<span class="wj-name" title="${r.judge}">${r.judge}</span>` +
-        `<span class="wj-metric">${metric}</span></div>`;
+        `<span class="wj-lean">${detail}</span>` +
+        `<span class="wj-metric">${(r.rate * 100).toFixed(0)}%</span></div>`;
     }).join('');
-    body.querySelectorAll('.wj-row').forEach((el, i) => {
+    rateBody.querySelectorAll('.wj-row').forEach((el, i) => {
       el.style.cursor = 'pointer';
-      el.addEventListener('click', () => {
-        document.getElementById('archiveSearchKind').value = 'query_judge';
-        document.getElementById('archiveSearchName').value = rows[i].judge;
-        runArchiveSearch();
-        document.getElementById('archiveSearchCard').scrollIntoView({behavior:'smooth', block:'start'});
-      });
+      el.addEventListener('click', wjRowClickHandler(rateRows[i].judge));
     });
   }
+
+  const consistencyBody = document.getElementById('wjBoxBodyConsistency');
+  const consistencyRows = wjData.by_consistency;
+  if (!consistencyRows || consistencyRows.length === 0) {
+    consistencyBody.innerHTML = '<p class="wj-empty">Not enough data yet.</p>';
+  } else {
+    consistencyBody.innerHTML = consistencyRows.map((r, i) => {
+      const detail = `${r.n_nonclear}\u00a0non-clear events`;
+      return `<div class="wj-row"><span class="wj-rank">${i + 1}.</span>` +
+        `<span class="wj-name" title="${r.judge}">${r.judge}</span>` +
+        `<span class="wj-lean">${detail}</span>` +
+        `<span class="wj-metric">${(r.avg_q * 100).toFixed(2)}%</span></div>`;
+    }).join('');
+    consistencyBody.querySelectorAll('.wj-row').forEach((el, i) => {
+      el.style.cursor = 'pointer';
+      el.addEventListener('click', wjRowClickHandler(consistencyRows[i].judge));
+    });
+  }
+
+  document.getElementById('wjStatusText').textContent =
+    'Last updated: ' + formatWjTimestamp(wjData.computed_at);
+}
 
   document.getElementById('wjStatusText').textContent =
     'Last updated: ' + formatWjTimestamp(wjData.computed_at);
@@ -695,7 +726,6 @@ document.getElementById('wjToggleBtn').addEventListener('click', () => {
 });
 
 async function loadWorstJudgesTally(){
-  const body = document.getElementById('wjBoxBody');
   try {
     const res = await fetch('/api/analyze', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -709,7 +739,8 @@ async function loadWorstJudgesTally(){
     // Non-fatal -- the rest of the page (upload, search) works fine even if
     // this box fails (e.g. database not configured yet), so fail quietly
     // here rather than showing an alarming error box for a small widget.
-    body.innerHTML = '<p class="wj-empty">Unavailable right now.</p>';
+    document.getElementById('wjBoxBodyRate').innerHTML = '<p class="wj-empty">Unavailable right now.</p>';
+    document.getElementById('wjBoxBodyConsistency').innerHTML = '<p class="wj-empty">Unavailable right now.</p>';
   }
 }
 
