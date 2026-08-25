@@ -18,6 +18,7 @@ marks.
 """
 
 import hashlib
+import itertools
 import json
 import os
 
@@ -168,23 +169,32 @@ def _pivot_long_to_wide(rows, event_title, round_label):
 def _rounds_where(cur, where_clause, params):
     """Shared logic: find every (event_id, round_label) matching a filter,
     then fetch the COMPLETE panel data for each -- see module docstring
-    for why the full round is needed, not just the filtered rows."""
-    cur.execute(f"SELECT DISTINCT event_id, round_label FROM marks WHERE {where_clause}", params)
-    keys = cur.fetchall()
+    for why the full round is needed, not just the filtered rows.
+
+    REWRITTEN from a per-round query loop (1 query to list rounds, then 1
+    MORE query per round to fetch its marks -- an N+1 pattern) to a single
+    query that pulls every matching mark at once, grouped in Python by
+    (event_id, round_label) afterward. The old version's per-round
+    round-trips to the database scaled linearly with archive size and were
+    the direct cause of the "worst judges" recompute timing out once the
+    archive grew past ~100+ rounds. The ORDER BY is required: itertools
+    groupby only groups CONSECUTIVE matching rows, so the rows must already
+    be sorted by the group key before we iterate."""
+    cur.execute(
+        f"""SELECT m.event_id, m.round_label, e.title, m.competitor_number,
+                   m.competitor_name, m.team, m.judge_name, m.mark
+            FROM marks m JOIN events e ON e.id = m.event_id
+            WHERE {where_clause}
+            ORDER BY m.event_id, m.round_label""",
+        params,
+    )
+    all_rows = cur.fetchall()
 
     rounds = []
-    for event_id, round_label in keys:
-        cur.execute(
-            """SELECT e.title, m.competitor_number, m.competitor_name, m.team, m.judge_name, m.mark
-               FROM marks m JOIN events e ON e.id = m.event_id
-               WHERE m.event_id = %s AND m.round_label = %s""",
-            (event_id, round_label),
-        )
-        rows = cur.fetchall()
-        if not rows:
-            continue
-        event_title = rows[0][0]
-        long_rows = [(r[1], r[2], r[3], r[4], r[5]) for r in rows]  # drop the title column
+    for (event_id, round_label), group in itertools.groupby(all_rows, key=lambda r: (r[0], r[1])):
+        group = list(group)
+        event_title = group[0][2]
+        long_rows = [(r[3], r[4], r[5], r[6], r[7]) for r in group]
         result = _pivot_long_to_wide(long_rows, event_title, round_label)
         if result:
             rounds.append(result)

@@ -712,7 +712,11 @@ function renderWjBox(){
     });
   }
 
-  async function loadWorstJudgesTally(){
+  document.getElementById('wjStatusText').textContent =
+    'Last updated: ' + formatWjTimestamp(wjData.computed_at);
+}
+
+async function loadWorstJudgesTally(){
   try {
     const res = await fetch('/api/analyze', {
       method: 'POST', headers: {'Content-Type':'application/json'},

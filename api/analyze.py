@@ -120,7 +120,14 @@ def _competitor_identity(df, i):
     event and are NOT a reliable way to track the same person over time);
     falls back to competitor_id only when no usable name is present, and
     says so, since that fallback is a real reliability downgrade worth
-    surfacing rather than hiding."""
+    surfacing rather than hiding.
+
+    Kept as-is (still does a per-row .iloc lookup) for any external caller
+    that wants one row's identity in isolation; competitor_watch's hot loop
+    uses _competitor_identity_values below instead, which does the exact
+    same lookup logic but on an already-extracted plain value so it can run
+    once per row instead of once per (row, judge) pair -- see that
+    function's docstring."""
     name = str(df["name"].iloc[i]).strip() if "name" in df.columns and pd.notna(df["name"].iloc[i]) else ""
     if name:
         return (("name", name), name, "name")
@@ -128,18 +135,47 @@ def _competitor_identity(df, i):
     return (("id", cid), f"Competitor #{cid}", "competitor_id")
 
 
+def _competitor_identity_values(name_val, cid_val):
+    """Same matching logic as _competitor_identity, but takes an
+    already-extracted plain Python value instead of doing a fresh pandas
+    .iloc[] lookup on every call. competitor_watch used to call
+    _competitor_identity(df, i) once per (row, judge) pair -- for a panel of
+    5 judges that's 5x more pandas row-lookups than necessary, since a
+    competitor's identity doesn't depend on which judge is being processed.
+    Hoisting identity computation to run once per row, before the judge
+    loop, removes the multiplier. Verified to produce IDENTICAL results to
+    the original per-call version by diffing against it directly across
+    several synthetic archives, including edge cases (ID-fallback
+    competitors, missing team column, missing values) before this shipped."""
+    name = str(name_val).strip() if pd.notna(name_val) else ""
+    if name:
+        return (("name", name), name, "name")
+    return (("id", cid_val), f"Competitor #{cid_val}", "competitor_id")
+
+
 def competitor_watch(events, min_shared_events=3, q_threshold=0.10):
     rows = []
     for label, df, judge_cols in events:
         normalized = normalize_scores(df, judge_cols)
+        # Identity/team lookups depend on the ROW, not the judge -- computed
+        # once per event here (via plain Python lists, not repeated .iloc[])
+        # instead of once per (row, judge) pair as the original loop did.
+        name_col = df["name"].tolist() if "name" in df.columns else [None] * len(df)
+        cid_col = df["competitor_id"].tolist()
+        # NOTE: str(x) applied per-element here, NOT df["team"].astype(str) --
+        # astype(str) handles NaN/None differently from Python's own str()
+        # and produced a silent mismatch on rows with a missing team when
+        # tried; confirmed by diff-testing against the original code.
+        team_col = ([str(t) for t in df["team"].tolist()] if "team" in df.columns
+                    else [""] * len(df))
+        identities = [_competitor_identity_values(n, c) for n, c in zip(name_col, cid_col)]
         for judge in judge_cols:
             other = [j for j in judge_cols if j != judge]
             gap = normalized[judge] - normalized[other].mean(axis=1)
-            for i in range(len(df)):
-                key, display, method = _competitor_identity(df, i)
+            gap_vals = gap.tolist()
+            for (key, display, method), team, g in zip(identities, team_col, gap_vals):
                 rows.append({"key": key, "display": display, "method": method,
-                            "team": str(df["team"].iloc[i]) if "team" in df.columns else "",
-                            "judge": judge, "gap": float(gap.iloc[i]), "label": label})
+                            "team": team, "judge": judge, "gap": float(g), "label": label})
     history = pd.DataFrame(rows)
     if history.empty:
         return [], 0, {"name": 0, "competitor_id": 0}
@@ -192,14 +228,16 @@ def team_watch(events, min_observations=5, q_threshold=0.10):
         if "team" not in df.columns:
             continue
         normalized = normalize_scores(df, judge_cols)
+        # Same hoist-out-of-the-judge-loop change as competitor_watch above.
+        team_col = [str(t) if pd.notna(t) else "" for t in df["team"].tolist()]
         for judge in judge_cols:
             other = [j for j in judge_cols if j != judge]
             gap = normalized[judge] - normalized[other].mean(axis=1)
-            for i in range(len(df)):
-                team = str(df["team"].iloc[i]) if pd.notna(df["team"].iloc[i]) else ""
+            gap_vals = gap.tolist()
+            for team, g in zip(team_col, gap_vals):
                 if not team:
                     continue
-                rows.append({"team": team, "judge": judge, "gap": float(gap.iloc[i]), "event": label})
+                rows.append({"team": team, "judge": judge, "gap": float(g), "event": label})
     history = pd.DataFrame(rows)
     if history.empty:
         return [], 0
