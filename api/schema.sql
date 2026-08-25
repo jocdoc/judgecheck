@@ -52,6 +52,15 @@ CREATE INDEX IF NOT EXISTS idx_marks_event      ON marks (event_id);
 -- queries directly instead of intersecting two single-column indexes.
 CREATE INDEX IF NOT EXISTS idx_marks_judge_team       ON marks (judge_name, team);
 CREATE INDEX IF NOT EXISTS idx_marks_judge_competitor ON marks (judge_name, competitor_name);
+-- _rounds_where (db.py) fetches full-archive data with
+-- "WHERE ... ORDER BY event_id, round_label" -- this composite index lets
+-- Postgres satisfy that filter+sort directly from the index instead of
+-- pulling every matching row into memory and sorting it from scratch.
+-- Added after a real production timeout on "Recompute now": the N+1 query
+-- pattern that call used to have was fixed first, but the single
+-- consolidated query it was replaced with still needed this index to
+-- avoid a full sort of the marks table on a large, multi-year archive.
+CREATE INDEX IF NOT EXISTS idx_marks_event_round ON marks (event_id, round_label);
 
 -- BOUNDED, DELIBERATE EXCEPTION to the "raw marks only, never pre-computed
 -- statistics" principle stated above. This table caches the homepage
