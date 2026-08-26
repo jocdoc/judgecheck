@@ -1163,24 +1163,73 @@ MIN_EVENTS_FOR_RATE_RANKING = 3  # a judge needs at least this many events
 # min_shared_events=3). Without this, a judge who's only judged 1-2 events
 # can show a misleadingly perfect 100% (or 0%) rate that isn't really a
 # track record yet.
-MIN_NONCLEAR_EVENTS_FOR_CONSISTENCY = 2  # a "how consistent is the concern"
-# metric needs at least 2 non-clear (Second Look or Flagged) events to
-# average over -- averaging a single q value isn't measuring consistency,
-# it's just restating that one event's result under a different name.
+MIN_TESTS_FOR_CONSISTENCY = 2  # a "how anomalous is this judge on average
+# across their whole tested history" metric needs at least 2 underlying
+# tests to average over -- averaging a single q value isn't measuring
+# consistency, it's just restating that one result.
 
 
-def _archive_wide_event_severity(rounds):
+def _worst_judges_by_consistency(comp_results, team_results, min_tests=MIN_TESTS_FOR_CONSISTENCY, top_n=10):
+    """List 2: the plain average of q across every competitor-level and
+    team-level TEST a judge underwent (flagged, second-look, or clean-but-
+    tested alike) -- one entry per tested subject (a specific competitor or
+    a specific team), NOT per event.
+
+    THIS DISTINCTION IS NOT OPTIONAL. An earlier version of this averaged
+    over per-EVENT entries instead (broadcasting each test's q to every
+    event that subject shares with the judge). That silently double-counts:
+    a single competitor who shares 16 events with a judge contributes that
+    ONE test's q sixteen times to the average, while a competitor who only
+    shares 3 events contributes their test's q just three times -- so a
+    judge's average ends up implicitly weighted by how many repeat events
+    they happen to share with a small number of subjects, not by how many
+    independent pieces of evidence exist. Confirmed via synthetic testing:
+    a judge with ZERO real bias, who simply judges the same team/panel
+    repeatedly (correlated but unbiased), scored meaningfully WORSE than
+    equally-unbiased judges with less repeat overlap -- a false alarm from
+    broadcast duplication, not from anything resembling real behavior. See
+    validate_consistency_metric.py for the check this must keep passing.
+
+    Averaging one q per TEST instead removes that duplication: each
+    competitor or team a judge was tested against contributes exactly one
+    number, regardless of how many events that history was built from.
+
+    A LOWER average here means this judge's typical test outcome, across
+    every subject they were ever tested against, tends to sit closer to
+    genuinely anomalous rather than comfortably clear -- a persistent
+    pattern rather than a one-off. A judge with one severely anomalous test
+    and many other clean, well-tested ones gets that low q diluted by the
+    rest, so a single outlier still doesn't dominate this list -- that's
+    what List 1's count and the single-judge lookup's Flagged count are
+    for. Requires at least min_tests qualifying tests; ties broken by more
+    qualifying tests (a low average backed by more tests is more reliable
+    than the same average from just barely enough)."""
+    q_lists = {}
+    for r in comp_results:
+        q_lists.setdefault(r["judge"], []).append(r["q"])
+    for r in team_results:
+        q_lists.setdefault(r["judge"], []).append(r["q"])
+
+    rows = []
+    for judge, qs in q_lists.items():
+        if len(qs) < min_tests:
+            continue
+        rows.append({"judge": judge, "avg_q": sum(qs) / len(qs), "n_tests": len(qs)})
+    rows.sort(key=lambda x: (x["avg_q"], -x["n_tests"]))
+    return rows[:top_n]
+
+
+def _archive_wide_event_severity(rounds, comp_results, team_results):
     """Generalizes judge_event_breakdown (which classifies one judge's
     events at a time, for the single-judge lookup page) to classify EVERY
     (judge, event) pair's severity in a single pass over the whole archive.
 
-    This deliberately does NOT call judge_event_breakdown / _compute_subject_flags
-    once per judge -- either of those reruns competitor_watch/team_watch from
-    scratch on every call, and looping that once per judge across the whole
-    archive would reproduce exactly the kind of N+1 pattern that caused the
+    Takes comp_results/team_results as arguments rather than computing them
+    here, so _compute_worst_judges_tally can call competitor_watch/team_watch
+    ONCE and reuse the results for both this function and
+    _worst_judges_by_consistency -- calling either from scratch a second
+    time would reproduce exactly the kind of N+1 pattern that caused the
     original worst-judges recompute timeout (see db.py's _rounds_where fix).
-    competitor_watch/team_watch are each called ONCE here, and every judge's
-    events are classified from those same two result sets.
 
     Uses the exact same severity rule already established by
     judge_event_breakdown, unchanged: 'clear' if no flag traces back to this
@@ -1196,8 +1245,6 @@ def _archive_wide_event_severity(rounds):
     Returns {judge_name: [{'label', 'severity', 'q'}, ...]} -- one entry per
     event that judge appeared in; 'q' is None for 'clear' events, since no
     flag (and therefore no q) exists for them."""
-    comp_results, _, _ = competitor_watch(rounds)
-    team_results, _ = team_watch(rounds)
     comp_flagged = [r for r in comp_results if r.get("flagged")]
     team_flagged = [r for r in team_results if r.get("flagged")]
 
@@ -1224,10 +1271,14 @@ def _archive_wide_event_severity(rounds):
 
 
 def _worst_judges_by_rate(per_judge_events, min_events=MIN_EVENTS_FOR_RATE_RANKING, top_n=10):
-    """List 1: what fraction of a judge's judged events were Second Look or
-    Flagged, out of every event they judged. Ties broken by more events
-    judged (a rate backed by a bigger track record ranks above the same
-    rate from fewer events)."""
+    """List 1: judges ranked by RAW COUNT of notable (Second Look + Flagged)
+    events, out of every event they judged. Rate is still computed and
+    returned for display, but is no longer the ranking key -- per explicit
+    decision, a judge with 40 notable events out of 200 judged should rank
+    above one with 2 notable events out of 3, even though the latter has
+    the higher rate; a bigger absolute track record of notable events is
+    the more actionable signal for this list. Ties broken by higher rate
+    (more concentrated pattern) among equal counts."""
     rows = []
     for judge, events in per_judge_events.items():
         n_total = len(events)
@@ -1239,64 +1290,57 @@ def _worst_judges_by_rate(per_judge_events, min_events=MIN_EVENTS_FOR_RATE_RANKI
         rows.append({"judge": judge, "n_total": n_total, "n_second_look": n_second_look,
                     "n_flagged": n_flagged, "n_notable": n_notable,
                     "rate": n_notable / n_total})
-    rows.sort(key=lambda x: (-x["rate"], -x["n_total"]))
-    return rows[:top_n]
-
-
-def _worst_judges_by_avg_q(per_judge_events, min_nonclear=MIN_NONCLEAR_EVENTS_FOR_CONSISTENCY, top_n=10):
-    """List 2: the plain average of q across a judge's own Second Look/
-    Flagged events only ('clear' events have no q and are excluded, not
-    treated as q=1 -- this measures the typical severity of THIS judge's
-    OWN incidents, not how rare incidents are for them, which is what List 1
-    already covers).
-
-    A HIGHER average here means a judge's typical flagged/second-look event
-    tends to be more borderline rather than severely anomalous, but recurs
-    across multiple events -- a persistent low-grade pattern rather than one
-    severe outlier. A judge with a single very extreme event (tiny q) and
-    otherwise clear events won't dominate this list even though that one
-    event might be alarming on its own -- that's what List 1's rate and the
-    single-judge lookup's Flagged count are for. Requires at least
-    min_nonclear qualifying events; ties broken by more qualifying events."""
-    rows = []
-    for judge, events in per_judge_events.items():
-        qs = [e["q"] for e in events if e["q"] is not None]
-        if len(qs) < min_nonclear:
-            continue
-        rows.append({"judge": judge, "avg_q": sum(qs) / len(qs), "n_nonclear": len(qs)})
-    rows.sort(key=lambda x: (-x["avg_q"], -x["n_nonclear"]))
+    rows.sort(key=lambda x: (-x["n_notable"], -x["rate"]))
     return rows[:top_n]
 
 
 def _compute_worst_judges_tally(rounds):
-    """Archive-wide, landing-page rankings. Both lists are pure aggregation
-    over the SAME already-validated per-event severity classification that
-    powers the single-judge lookup page's Clear/Second Look/Flagged
-    breakdown (judge_event_breakdown) -- computed once archive-wide here
-    (see _archive_wide_event_severity) instead of once per judge, so
-    neither list is a new statistical test and neither needs its own Monte
-    Carlo validation.
+    """Archive-wide, landing-page rankings.
 
-    by_rate: judges ranked by what fraction of their events were notable
-    (Second Look or Flagged) -- 'how often is this judge under any
-    suspicion at all'.
-    by_consistency: judges ranked by the average q of their own non-clear
-    events -- 'when this judge has a notable event, how borderline-but-
-    recurring is the typical pattern', a different axis from severity or
-    frequency alone. See _worst_judges_by_avg_q's docstring for why a
-    HIGHER average is the 'worse' direction here.
+    by_rate: judges ranked by RAW COUNT of notable (Second Look or Flagged)
+    events -- 'how often is this judge under any suspicion at all', in
+    absolute terms. Pure aggregation over the same already-validated
+    per-event severity classification that powers the single-judge lookup
+    page (judge_event_breakdown) -- not a new statistical test, no Monte
+    Carlo needed of its own.
+
+    by_consistency: judges ranked by the average q across every competitor-
+    level and team-level TEST they underwent (flagged, second-look, or
+    clean-but-tested) -- 'across this judge's whole tested history, how
+    anomalous is the typical outcome', a different axis from raw frequency.
+    UNLIKE by_rate, this IS a new combined statistic (averaging many q's
+    together), not a restatement of an existing one -- averaging correlated
+    or duplicated test results is exactly the failure shape that broke an
+    earlier design (Fisher's combined probability, 100% false-alarm rate,
+    because tests sharing a round aren't independent). An initial version
+    of this averaged per EVENT instead of per TEST and reintroduced that
+    same failure mode by a different route (broadcasting one test's q to
+    every event that subject shares with the judge, over-weighting
+    frequently-repeated subjects) -- caught by synthetic testing before
+    shipping, not assumed safe just because the individual q's were already
+    valid. See _worst_judges_by_consistency's docstring and
+    validate_consistency_metric.py for the check this must keep passing.
+
+    comp_results/team_results are computed ONCE here and passed to both
+    _archive_wide_event_severity and _worst_judges_by_consistency --
+    calling competitor_watch/team_watch a second time for the same rounds
+    would reproduce the N+1-style cost the original worst-judges timeout
+    was fixed to avoid.
 
     Returns {by_rate, by_consistency, n_judges_with_flags}."""
     if not rounds:
         return {"by_rate": [], "by_consistency": [], "n_judges_with_flags": 0}
 
-    per_judge_events = _archive_wide_event_severity(rounds)
+    comp_results, _, _ = competitor_watch(rounds)
+    team_results, _ = team_watch(rounds)
+
+    per_judge_events = _archive_wide_event_severity(rounds, comp_results, team_results)
     n_judges_with_flags = sum(
         1 for events in per_judge_events.values()
         if any(e["severity"] != "clear" for e in events))
 
     by_rate = _worst_judges_by_rate(per_judge_events)
-    by_consistency = _worst_judges_by_avg_q(per_judge_events)
+    by_consistency = _worst_judges_by_consistency(comp_results, team_results)
 
     return {"by_rate": by_rate, "by_consistency": by_consistency,
             "n_judges_with_flags": n_judges_with_flags}

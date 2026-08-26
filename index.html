@@ -289,7 +289,7 @@ table.preview-table tr:nth-child(even) td{background:#FAFAF8}
 
     <div class="tech-note">
       <p class="wj-box-title"><span>For a Statistical Audience (very brief)</span></p>
-      <p>Single-event check: test statistic is the most extreme judge-vs-panel-mean deviation among competitors in a round; significance is calibrated empirically via permutation (reshuffling judge labels within the round) rather than a parametric null, since panel size per round is small. Cross-event checks pool a judge's gap-vs-panel-mean across every shared event per competitor/school and run a one-sample t-test against zero. The two landing-page lists are aggregations over that same already-corrected output (notable-event rate; mean q restricted to non-clear events) &mdash; not additional inferential tests. Multiplicity is controlled via Benjamini-Hochberg FDR across all simultaneously tested judge-subject pairs (q &lt; 0.10 flagged, &lt; 0.05 for event-level severity). No correction is applied <em>across</em> the three test families (single-event, competitor-level, team-level) or across repeated archive-wide re-tests over time, so the FDR bound holds within each family, not globally.</p>
+      <p>Single-event check: test statistic is the most extreme judge-vs-panel-mean deviation among competitors in a round; significance is calibrated empirically via permutation (reshuffling judge labels within the round) rather than a parametric null, since panel size per round is small. Cross-event checks pool a judge's gap-vs-panel-mean across every shared event per competitor/school and run a one-sample t-test against zero. The two landing-page lists are aggregations over that same already-corrected output: total notable-event count, and mean q averaged across every competitor-level and team-level test a judge underwent (one q per tested subject, flagged or not) &mdash; the first is a restatement of already-flagged results, the second is a new combined statistic validated separately against synthetic archives before deployment, given that naively averaging duplicated or correlated q's carries the same non-independence risk that ruled out a Fisher's-method approach elsewhere in this project. Multiplicity is controlled via Benjamini-Hochberg FDR across all simultaneously tested judge-subject pairs (q &lt; 0.10 flagged, &lt; 0.05 for event-level severity). No correction is applied <em>across</em> the three test families (single-event, competitor-level, team-level) or across repeated archive-wide re-tests over time, so the FDR bound holds within each family, not globally.</p>
     </div>
   </div>
 
@@ -745,7 +745,7 @@ function renderWjBox(){
     consistencyBody.innerHTML = '<p class="wj-empty">Not enough data yet.</p>';
   } else {
     consistencyBody.innerHTML = consistencyRows.map((r, i) => {
-      const detail = `${r.n_nonclear}\u00a0non-clear events`;
+      const detail = `${r.n_tests}\u00a0tests`;
       return `<div class="wj-row"><span class="wj-rank">${i + 1}.</span>` +
         `<span class="wj-name" title="${r.judge}">${r.judge}</span>` +
         `<span class="wj-lean">${detail}</span>` +
