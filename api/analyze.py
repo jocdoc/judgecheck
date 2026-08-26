@@ -1310,7 +1310,7 @@ def analyze_payload(payload):
     # above) keeps working even before a database is provisioned. ---
     if action in ("ingest", "bulk_ingest", "check_duplicate", "query_judge", "query_team",
                  "query_competitor", "list_events", "search_names", "worst_judges_tally",
-                 "recompute_worst_judges_tally"):
+                 "recompute_worst_judges_tally", "archive_stats"):
         from . import db
 
         # REAL BUG FOUND LIVE: ensure_schema() was defined in db.py (its own
@@ -1415,6 +1415,13 @@ def analyze_payload(payload):
 
         if action == "list_events":
             return {"events": db.list_events()}
+
+        if action == "archive_stats":
+            # Cheap, page-load-safe counts for footer/about-page display --
+            # deliberately separate from worst_judges_tally, which is cache-
+            # backed and updates only on explicit recompute. This is a plain
+            # COUNT(*), safe to run on every load.
+            return {"n_marks": db.count_all_marks()}
 
         if action == "search_names":
             return {"matches": db.search_names(payload.get("prefix", ""), payload.get("kind", "competitor_name"))}

@@ -222,6 +222,20 @@ def _rounds_where(cur, where_clause, params):
     return rounds
 
 
+def count_all_marks():
+    """Total number of individual results (rows in `marks`) across the whole
+    archive. A single COUNT(*) -- no join, no round reconstruction -- so
+    it's safe to call on every page load, unlike fetch_all_rounds() which
+    rebuilds full panel data for the whole archive."""
+    conn = _connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM marks")
+            return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
 def count_events_for_judge(judge_name):
     """Fast COUNT query -- deliberately cheap, unlike fetch_rounds_for_judge
     which reconstructs full panel data for every round the judge appears in.
