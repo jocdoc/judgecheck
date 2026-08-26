@@ -1340,19 +1340,31 @@ def _compute_worst_judges_tally(rounds):
     was fixed to avoid.
 
     Returns {by_rate, by_consistency, n_judges_with_flags}."""
+    import time
     if not rounds:
         return {"by_rate": [], "by_consistency": [], "n_judges_with_flags": 0}
 
+    t0 = time.monotonic()
     comp_results, _, _ = competitor_watch(rounds)
+    t1 = time.monotonic()
+    print(f"[timing] competitor_watch = {t1 - t0:.2f}s, {len(comp_results)} results", flush=True)
+
     team_results, _ = team_watch(rounds)
+    t2 = time.monotonic()
+    print(f"[timing] team_watch = {t2 - t1:.2f}s, {len(team_results)} results", flush=True)
 
     per_judge_events = _archive_wide_event_severity(rounds, comp_results, team_results)
+    t3 = time.monotonic()
+    print(f"[timing] _archive_wide_event_severity = {t3 - t2:.2f}s", flush=True)
+
     n_judges_with_flags = sum(
         1 for events in per_judge_events.values()
         if any(e["severity"] != "clear" for e in events))
 
     by_rate = _worst_judges_by_rate(per_judge_events)
     by_consistency = _worst_judges_by_consistency(comp_results, team_results)
+    t4 = time.monotonic()
+    print(f"[timing] both rankings = {t4 - t3:.2f}s", flush=True)
 
     return {"by_rate": by_rate, "by_consistency": by_consistency,
             "n_judges_with_flags": n_judges_with_flags, "tally_version": TALLY_VERSION}
@@ -1520,7 +1532,14 @@ def analyze_payload(payload):
                 return {**cached, "recomputed": False, "up_to_date": True}
 
             rounds = db.fetch_all_rounds()
+            print(f"[timing] recompute: fetch_all_rounds returned {len(rounds)} rounds", flush=True)
+
+            import time
+            t0 = time.monotonic()
             fresh = _compute_worst_judges_tally(rounds)
+            t1 = time.monotonic()
+            print(f"[timing] recompute: _compute_worst_judges_tally = {t1 - t0:.2f}s", flush=True)
+
             db.set_worst_judges_cache(fresh)
             stored = db.get_worst_judges_cache()  # re-read to pick up the real computed_at from the DB
             return {**stored, "recomputed": True, "up_to_date": True}

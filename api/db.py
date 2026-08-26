@@ -193,9 +193,20 @@ def _rounds_where(cur, where_clause, params):
     per-round pattern this was originally rewritten to avoid -- see below).
     The ORDER BY is required: itertools groupby only groups CONSECUTIVE
     matching rows, so the rows must already be sorted by the group key
-    before we iterate."""
+    before we iterate.
+
+    TEMPORARY TIMING INSTRUMENTATION: printed with flush=True so the
+    numbers land in Vercel's log even if the function is later killed by
+    the 60s timeout (unflushed output can be lost on an abrupt kill).
+    Added to diagnose exactly which stage a 504 on "Recompute now" is
+    coming from at current archive scale, before picking a fix -- remove
+    once the bottleneck is identified and addressed."""
+    import time
+    t0 = time.monotonic()
     cur.execute(f"SELECT DISTINCT event_id, round_label FROM marks WHERE {where_clause}", params)
     keys = cur.fetchall()
+    t1 = time.monotonic()
+    print(f"[timing] _rounds_where: key query = {t1 - t0:.2f}s, {len(keys)} (event,round) keys", flush=True)
     if not keys:
         return []
 
@@ -210,6 +221,8 @@ def _rounds_where(cur, where_clause, params):
         (event_ids, round_labels),
     )
     all_rows = cur.fetchall()
+    t2 = time.monotonic()
+    print(f"[timing] _rounds_where: full-panel query = {t2 - t1:.2f}s, {len(all_rows)} rows", flush=True)
 
     rounds = []
     for (event_id, round_label), group in itertools.groupby(all_rows, key=lambda r: (r[0], r[1])):
@@ -219,6 +232,8 @@ def _rounds_where(cur, where_clause, params):
         result = _pivot_long_to_wide(long_rows, event_title, round_label)
         if result:
             rounds.append(result)
+    t3 = time.monotonic()
+    print(f"[timing] _rounds_where: per-round reconstruction = {t3 - t2:.2f}s, {len(rounds)} rounds built", flush=True)
     return rounds
 
 
