@@ -1294,6 +1294,18 @@ def _worst_judges_by_rate(per_judge_events, min_events=MIN_EVENTS_FOR_RATE_RANKI
     return rows[:top_n]
 
 
+TALLY_VERSION = "consistency-v2-per-test"  # bump this any time the tally's
+# CALCULATION changes (not just new data landing) -- e.g. the by_rate
+# ranking key or by_consistency's aggregation method. The "Recompute now"
+# button's freshness check compares this against what's stored in the
+# cache; a mismatch forces a real recompute even if no new event has been
+# imported, since the numbers can go stale from a code deploy just as much
+# as from new data. Caught live: after reworking by_consistency to average
+# per-test instead of per-non-clear-event, clicking "Recompute now" with no
+# new data silently kept serving the OLD calculation's cached result,
+# because the freshness check only ever compared timestamps.
+
+
 def _compute_worst_judges_tally(rounds):
     """Archive-wide, landing-page rankings.
 
@@ -1343,7 +1355,7 @@ def _compute_worst_judges_tally(rounds):
     by_consistency = _worst_judges_by_consistency(comp_results, team_results)
 
     return {"by_rate": by_rate, "by_consistency": by_consistency,
-            "n_judges_with_flags": n_judges_with_flags}
+            "n_judges_with_flags": n_judges_with_flags, "tally_version": TALLY_VERSION}
 
 
 def analyze_payload(payload):
@@ -1482,13 +1494,15 @@ def analyze_payload(payload):
             return cached
 
         if action == "recompute_worst_judges_tally":
-            # Button-triggered only. Does real work ONLY if new data has
-            # landed since the last recompute -- compares the most recent
-            # event's ingested_at against the cache's own computed_at,
-            # rather than recomputing unconditionally every time someone
-            # clicks the button (which would defeat the point of caching
-            # at all -- most clicks will happen with no new data since the
-            # last one).
+            # Button-triggered only. Does real work if EITHER new data has
+            # landed since the last recompute OR the tally's calculation
+            # itself has changed (TALLY_VERSION bumped) since the cache was
+            # last written -- a code change makes the old cached numbers
+            # just as stale as new data would, and skipping on timestamp
+            # alone would silently keep serving the OLD calculation's
+            # result after a deploy. Otherwise, returns the existing cache
+            # unchanged rather than re-scanning the whole archive for no
+            # reason.
             cached = db.get_worst_judges_cache()
             latest_import = db.latest_import_timestamp()
 
@@ -1498,11 +1512,11 @@ def analyze_payload(payload):
                 # up_to_date=True so the frontend doesn't imply stale data.
                 return {"by_rate": [], "by_consistency": [], "n_judges_with_flags": 0,
                        "computed_at": None, "recomputed": False, "up_to_date": True}
-               
-            if cached is not None and latest_import <= _parse_iso(cached["computed_at"]):
-                # Nothing new since last recompute -- return the existing
-                # cache unchanged rather than re-scanning the whole archive
-                # for no reason.
+
+            cache_is_current_version = cached is not None and cached.get("tally_version") == TALLY_VERSION
+            if cache_is_current_version and latest_import <= _parse_iso(cached["computed_at"]):
+                # Same calculation version, and nothing new since last
+                # recompute -- return the existing cache unchanged.
                 return {**cached, "recomputed": False, "up_to_date": True}
 
             rounds = db.fetch_all_rounds()
