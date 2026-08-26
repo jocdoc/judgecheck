@@ -38,6 +38,11 @@ h1 em{font-style:italic;font-weight:500;color:var(--clear)}
 .upload-card{background:var(--paper-raised);border:1px solid var(--line);border-radius:12px;padding:26px;margin-bottom:18px}
 .upload-card h2{font-family:'Fraunces',serif;font-weight:600;font-size:20px;margin:0 0 4px}
 .upload-sub{font-size:13.5px;color:var(--ink-soft);margin:0 0 18px}
+.stats-explainer h3{font-family:'Fraunces',serif;font-weight:600;font-size:15px;color:var(--ink);margin:20px 0 6px}
+.stats-explainer h3:first-of-type{margin-top:2px}
+.stats-explainer p{font-size:13.5px;color:var(--ink-soft);margin:0 0 4px;line-height:1.6}
+.stats-explainer .tech-note{margin-top:20px;padding-top:14px;border-top:1px solid var(--line)}
+.stats-explainer .tech-note p{font-size:12.5px;line-height:1.55}
 
 .card-header-row{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:4px}
 .card-header-row .card-header-main{flex:1;min-width:220px}
@@ -255,6 +260,36 @@ table.preview-table tr:nth-child(even) td{background:#FAFAF8}
     <div class="report-actions">
       <button class="btn btn-ghost" id="downloadBtn">Download report</button>
       <button class="btn btn-ghost" id="resetBtn">Start over</button>
+    </div>
+  </div>
+
+  <div class="upload-card stats-explainer" id="statsExplainerCard">
+    <h2>How JudgeCheck's Statistics Work</h2>
+    <p class="upload-sub">A plain-language explanation of what the flags, lists, and reports on this site actually mean.</p>
+
+    <h3>The Core Idea</h3>
+    <p>JudgeCheck never asks &ldquo;was this score high or low?&rdquo; It asks: <strong>did one judge score noticeably differently than the other judges on the same panel, for the same dancers, in the same round?</strong> Every check compares a judge to their fellow judges sitting right next to them &mdash; not to some outside standard.</p>
+
+    <h3>Individual Event Reports: Clear / Second Look / Flagged</h3>
+    <p>For one competition round, JudgeCheck checks whether any judge's scores drifted unusually far from the rest of the panel's consensus. To decide what counts as &ldquo;unusual&rdquo; rather than normal disagreement between judges, it runs a computer simulation: it randomly reshuffles which judge gave which score, thousands of times, and sees how often a mismatch this large happens by pure chance. If the real result is rarer than chance alone would produce, that round gets flagged.</p>
+    <p><strong>Clear</strong> &mdash; nothing statistically surprising.&nbsp; <strong>Second Look</strong> &mdash; a noticeable but not extreme mismatch.&nbsp; <strong>Flagged</strong> &mdash; very unlikely to be a coincidence.</p>
+
+    <h3>Favoritism / Punishment Patterns</h3>
+    <p>When the <em>same</em> dancer or <em>same</em> school is scored by the <em>same</em> judge across multiple, separate competitions, JudgeCheck checks for a pattern: does this judge consistently score them higher (&ldquo;favored&rdquo;) or lower (&ldquo;punished&rdquo;) than the rest of the panel, over and over? One odd result can be a fluke &mdash; a repeated pattern across separate events is more telling.</p>
+
+    <h3>Correcting for &ldquo;Testing Everyone&rdquo;</h3>
+    <p>JudgeCheck is checking many judges against many dancers and schools at once. Run enough comparisons, and a few will look surprising purely by chance &mdash; the same way flipping a coin a thousand times will occasionally produce ten heads in a row. A standard statistical correction (Benjamini-Hochberg) adjusts the bar for &ldquo;flagged&rdquo; based on how many total comparisons were run, so the flagged list stays trustworthy even at large scale.</p>
+
+    <h3>The Two Landing-Page Lists</h3>
+    <p><strong>Highest Flag Rate</strong> &mdash; Of every event a judge worked, what share came back Second Look or Flagged? Answers: how often is this judge under any suspicion at all?</p>
+    <p><strong>Least Consistent</strong> &mdash; Averages how strong the evidence was across just that judge's own flagged/second-look events. A judge can rank high here without ever having one severe incident &mdash; instead showing a repeated, milder pattern across many events.</p>
+
+    <h3>What This Is &mdash; and Isn't</h3>
+    <p>Every result is statistical: it flags <strong>&ldquo;unlikely to be random chance,&rdquo;</strong> not <strong>&ldquo;this judge did something wrong.&rdquo;</strong> Legitimate explanations can produce a flag too &mdash; a judge who specializes in a particular style, an unusual panel, or plain coincidence at low probability. Flags are meant to prompt a closer human look, not serve as a verdict.</p>
+
+    <div class="tech-note">
+      <p class="wj-box-title"><span>For a Statistical Audience (very brief)</span></p>
+      <p>Single-event check: test statistic is the most extreme judge-vs-panel-mean deviation among competitors in a round; significance is calibrated empirically via permutation (reshuffling judge labels within the round) rather than a parametric null, since panel size per round is small. Cross-event checks pool a judge's gap-vs-panel-mean across every shared event per competitor/school and run a one-sample t-test against zero. The two landing-page lists are aggregations over that same already-corrected output (notable-event rate; mean q restricted to non-clear events) &mdash; not additional inferential tests. Multiplicity is controlled via Benjamini-Hochberg FDR across all simultaneously tested judge-subject pairs (q &lt; 0.10 flagged, &lt; 0.05 for event-level severity). No correction is applied <em>across</em> the three test families (single-event, competitor-level, team-level) or across repeated archive-wide re-tests over time, so the FDR bound holds within each family, not globally.</p>
     </div>
   </div>
 
