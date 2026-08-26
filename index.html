@@ -318,7 +318,21 @@ table.preview-table tr:nth-child(even) td{background:#FAFAF8}
 })();
 
 let files = [];
-const MAX_FILES = 12, MAX_BYTES = 5*1024*1024;
+const MAX_FILES = 12, MAX_BYTES = 2.5*1024*1024; // per-file RAW cap -- kept low enough
+  // that even ONE file's base64-ENCODED form (raw * 4/3) stays safely under
+  // Vercel's hard 4.5MB request-body limit with margin. The previous 5MB cap was
+  // unsafe on its own: 5MB raw -> ~6.67MB encoded, already over the limit with
+  // zero other files involved. See MAX_TOTAL_BYTES below for why a per-file cap
+  // alone isn't enough when several files get sent together.
+const MAX_TOTAL_BYTES = 3.5*1024*1024; // this flow sends every selected file in
+  // ONE single request -- unlike bulk import, there's no batching here, so the
+  // COMBINED encoded size of everything currently added must itself stay under
+  // the safe budget, not just each file individually. Several files that each
+  // pass the per-file check can still add up past Vercel's real limit.
+
+function currentEncodedBytes(){
+  return files.reduce((s, f) => s + (f.content ? f.content.length : 0), 0);
+}
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
@@ -349,10 +363,19 @@ function addFiles(selected){
     showError('Please upload PDFs separately from CSV/Excel files.');
     return;
   }
+  let runningEstimate = currentEncodedBytes();
   for (const f of incoming){
     if (files.length >= MAX_FILES) { showError('Maximum '+MAX_FILES+' files.'); break; }
-    if (f.size > MAX_BYTES) { showError('"'+f.name+'" is over 5 MB.'); continue; }
+    if (f.size > MAX_BYTES) { showError('"'+f.name+'" is over '+Math.round(MAX_BYTES/1024/1024*10)/10+' MB.'); continue; }
     if (!/\.(csv|xlsx|xls|pdf)$/i.test(f.name)) { showError('"'+f.name+'": only .csv, .xlsx, or .pdf files.'); continue; }
+    const estBytes = f.size * 4 / 3; // base64 encoding overhead, before this file is
+      // actually read -- lets this check happen synchronously, same as the checks above,
+      // instead of waiting on an async file read just to make an accept/reject decision.
+    if (runningEstimate + estBytes > MAX_TOTAL_BYTES) {
+      showError('"'+f.name+'" would push this upload over the size limit for a single batch. Remove a file first, or use Bulk import below for larger sets.');
+      continue;
+    }
+    runningEstimate += estBytes;
     const reader = new FileReader();
     reader.onload = () => {
       files.push({ name: f.name, content: reader.result.split(',')[1] });
@@ -800,8 +823,26 @@ document.getElementById('wjRecomputeBtn').addEventListener('click', runWjRecompu
 loadWorstJudgesTally();
 
 // ---------- Bulk import ----------
-const BULK_CHUNK_SIZE = 6; // must match MAX_FILES in api/analyze.py -- this is what keeps
-                           // each server request safely under the 60s function timeout
+const BULK_CHUNK_SIZE = 6; // ceiling per batch for the 60s function timeout
+const BULK_CHUNK_MAX_BYTES = 3.5 * 1024 * 1024; // stays safely under Vercel's HARD
+  // 4.5MB request-body limit, even after JSON field-name/escaping overhead on top
+  // of the already-larger base64 encoding (~4/3x raw file size). This is a
+  // SEPARATE constraint from BULK_CHUNK_SIZE above -- one is about request TIME,
+  // this one is about request SIZE, and a batch must respect whichever limit it
+  // would hit first. The old code only ever checked file COUNT, never the actual
+  // encoded byte total -- real image/logo-heavy PDFs (e.g. official
+  // Oireachtas-branded result sheets) bundled 6-to-a-batch crossed 4.5MB and
+  // failed with a confusing "not valid JSON" error, since Vercel's 413 rejection
+  // is plain text, not JSON, and the old code assumed every response was JSON.
+const BULK_MAX_FILE_BYTES = 2.5 * 1024 * 1024; // a single file's RAW size must stay low
+  // enough that its ENCODED form (raw * 4/3, base64's overhead) fits safely inside
+  // BULK_CHUNK_MAX_BYTES on its own -- 2.5MB raw -> ~3.33MB encoded, comfortably
+  // under the 3.5MB batch budget with margin left over. These two constants must
+  // stay consistent with each other (encoded-size-of-max-file <= batch budget);
+  // an earlier version set this to 3MB without checking that math, which would
+  // have let a single large file form its own batch that STILL exceeded the
+  // byte budget -- caught by testing buildBulkBatches against a 2.9MB-file
+  // scenario before this shipped, not assumed correct from the arithmetic alone.
 let bulkFiles = [];
 let bulkCancelled = false;
 
@@ -819,9 +860,15 @@ bulkFileInput.addEventListener('change', () => { addBulkFiles(bulkFileInput.file
 function addBulkFiles(selected){
   const errBox = document.getElementById('bulkErrorBox');
   errBox.style.display = 'none';
+  const oversized = [];
   for (const f of selected){
     if (!/\.pdf$/i.test(f.name)) { continue; } // bulk import is PDF-only; silently skip non-PDFs rather than block the whole selection
+    if (f.size > BULK_MAX_FILE_BYTES) { oversized.push(f.name); continue; }
     bulkFiles.push(f);
+  }
+  if (oversized.length > 0) {
+    errBox.textContent = 'Skipped (too large for bulk import, upload individually instead): ' + oversized.join(', ');
+    errBox.style.display = 'block';
   }
   const note = document.getElementById('bulkModeNote');
   const startBtn = document.getElementById('bulkStartBtn');
@@ -830,11 +877,51 @@ function addBulkFiles(selected){
     startBtn.disabled = true;
   } else {
     note.style.display = 'block';
-    const nBatches = Math.ceil(bulkFiles.length / BULK_CHUNK_SIZE);
-    note.innerHTML = bulkFiles.length + ' PDF(s) selected &rarr; will be sent to the server in '
-      + nBatches + ' automatic batch(es) of up to ' + BULK_CHUNK_SIZE + '.';
+    // Estimate batch count from raw file sizes (encoded size is ~4/3x this) --
+    // just a preview; the actual send-time batching below measures real
+    // encoded length and is what actually enforces the byte limit.
+    const nBatchesEstimate = estimateBulkBatchCount(bulkFiles);
+    note.innerHTML = bulkFiles.length + ' PDF(s) selected &rarr; will be sent to the server in roughly '
+      + nBatchesEstimate + ' automatic batch(es) (up to ' + BULK_CHUNK_SIZE + ' files or ~'
+      + Math.round(BULK_CHUNK_MAX_BYTES / 1024 / 1024 * 10) / 10 + 'MB per batch, whichever comes first).';
     startBtn.disabled = false;
   }
+}
+
+function estimateBulkBatchCount(fileList){
+  let batches = 1, count = 0, bytes = 0;
+  for (const f of fileList) {
+    const est = f.size * 4 / 3;
+    if (count >= BULK_CHUNK_SIZE || (count > 0 && bytes + est > BULK_CHUNK_MAX_BYTES)) {
+      batches++; count = 0; bytes = 0;
+    }
+    count++; bytes += est;
+  }
+  return batches;
+}
+
+function buildBulkBatches(encodedFiles){
+  // Greedy batching by BOTH constraints at once -- a batch closes as soon as
+  // adding the next file would exceed either the file-count ceiling or the
+  // byte ceiling, whichever comes first. Each file's actual base64 length
+  // (not an estimate) is used here, since files are already read by this point.
+  const batches = [];
+  let current = [];
+  let currentBytes = 0;
+  for (const f of encodedFiles) {
+    const fBytes = f.content.length;
+    const wouldExceedCount = current.length >= BULK_CHUNK_SIZE;
+    const wouldExceedBytes = current.length > 0 && (currentBytes + fBytes) > BULK_CHUNK_MAX_BYTES;
+    if (wouldExceedCount || wouldExceedBytes) {
+      batches.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(f);
+    currentBytes += fBytes;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
 }
 
 function readFileAsBase64(file){
@@ -875,21 +962,60 @@ async function startBulkImport(){
   const counts = { saved: 0, duplicate: 0, needs_review: 0, error: 0 };
   let processed = 0;
 
-  for (let i = 0; i < total; i += BULK_CHUNK_SIZE) {
+  // Read (base64-encode) ALL files up front so batching below can measure each
+  // file's REAL encoded size, not an estimate -- this is what lets a batch
+  // actually respect the byte limit rather than just the file count.
+  document.getElementById('bulkProgressText').textContent = 'Reading files\u2026';
+  let encodedAll;
+  try {
+    encodedAll = await Promise.all(bulkFiles.map(async f => ({
+      name: f.name, content: await readFileAsBase64(f)
+    })));
+  } catch (err) {
+    errBox.textContent = err.message || 'Could not read one or more files.';
+    errBox.style.display = 'block';
+    startBtn.disabled = false;
+    cancelBtn.style.display = 'none';
+    return;
+  }
+  const batches = buildBulkBatches(encodedAll);
+
+  for (const batch of batches) {
     if (bulkCancelled) break;
-    const chunk = bulkFiles.slice(i, i + BULK_CHUNK_SIZE);
     document.getElementById('bulkProgressText').textContent =
-      'Processing ' + (processed + 1) + '-' + Math.min(processed + chunk.length, total) + ' of ' + total + '\u2026';
+      'Processing ' + (processed + 1) + '-' + Math.min(processed + batch.length, total) + ' of ' + total + '\u2026';
+
+    // Defense in depth: even though addBulkFiles/buildBulkBatches should
+    // already guarantee this, never actually SEND a batch that's grown past
+    // Vercel's real hard limit -- fail those files clearly instead of
+    // attempting a request that's certain to come back as a non-JSON 413.
+    const batchBytes = batch.reduce((s, f) => s + f.content.length, 0);
+    if (batchBytes > 4.3 * 1024 * 1024) {
+      for (const f of batch) {
+        counts.error = (counts.error || 0) + 1;
+        renderBulkResultRow({ filename: f.name, status: 'error', reasons: ['Too large to send safely -- please upload individually.'] });
+      }
+      processed += batch.length;
+      document.getElementById('bulkProgressFill').style.width = Math.round(processed / total * 100) + '%';
+      continue;
+    }
 
     try {
-      const encoded = await Promise.all(chunk.map(async f => ({
-        name: f.name, content: await readFileAsBase64(f)
-      })));
       const res = await fetch('/api/analyze', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ action: 'bulk_ingest', files: encoded })
+        body: JSON.stringify({ action: 'bulk_ingest', files: batch })
       });
-      const data = await res.json();
+      let data;
+      try {
+        data = await res.json();
+      } catch (parseErr) {
+        // The server (or Vercel's own infrastructure, e.g. a 413 for an
+        // oversized request) returned something that isn't JSON -- surface a
+        // clear reason instead of the raw "Unexpected token" parse error.
+        throw new Error(res.status === 413
+          ? 'This batch was too large for the server to accept. Please report this -- it should not happen after the byte-aware batching fix.'
+          : 'Server returned an unexpected response (status ' + res.status + ').');
+      }
       if (!res.ok) throw new Error(data.error || 'Batch failed.');
       for (const r of data.results) {
         counts[r.status] = (counts[r.status] || 0) + 1;
@@ -898,13 +1024,13 @@ async function startBulkImport(){
     } catch (err) {
       // a whole-batch failure (e.g. a network error) shouldn't lose track of which
       // files were in it -- mark each as an error row so nothing silently vanishes
-      for (const f of chunk) {
+      for (const f of batch) {
         counts.error = (counts.error || 0) + 1;
         renderBulkResultRow({ filename: f.name, status: 'error', reasons: [err.message] });
       }
     }
 
-    processed += chunk.length;
+    processed += batch.length;
     document.getElementById('bulkProgressFill').style.width = Math.round(processed / total * 100) + '%';
   }
 
